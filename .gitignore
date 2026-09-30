@@ -1,0 +1,44 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Secrets / local config ---
+.env
+.env.*
+
+# --- Datasets (multi-GB; download per data/README.md) ---
+data/*
+!data/README.md
+*.zip
+*.z[0-9][0-9]
+
+# --- Model training artifacts ---
+# Keep the runtime model (mouse_mdn.npz) and small JSON stats; skip
+# Keras checkpoints and logs.
+models/*.keras
+models/*.h5
+models/checkpoints/
+models/train_log.txt
+logs/
+
+# --- Runtime output (screenshots, debug captures) ---
+screenshots/
+*.log
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

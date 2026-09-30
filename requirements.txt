@@ -1,0 +1,8 @@
+pyautogui>=0.9.54        # mouse, keyboard, screenshots, image matching (also installs pygetwindow, pyscreeze)
+uiautomation>=2.0.18     # Windows UI Automation - find buttons/links by name
+pyperclip>=1.8           # clipboard
+opencv-python>=4.8       # enables confidence= in image matching
+pillow>=10.0             # screenshots
+psutil>=5.9              # check running processes
+# Optional OCR fallback (also needs the Tesseract-OCR program installed):
+# pytesseract>=0.3.10

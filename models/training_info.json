@@ -1,0 +1,24 @@
+{
+  "args": {
+    "dataset": "auto",
+    "data": "boun-mouse-dynamics-dataset.zip",
+    "out": "models",
+    "split": null,
+    "max_strokes": 40000,
+    "max_files": null,
+    "window_filter": "browsing",
+    "epochs": 25,
+    "batch": 64,
+    "units": 128,
+    "layers": 2,
+    "mixtures": 10,
+    "lr": 0.001,
+    "val_frac": 0.1,
+    "seed": 0
+  },
+  "n_train": 33012,
+  "n_val": 6988,
+  "final_loss": -3.144106388092041,
+  "best_val_loss": -2.9625470638275146,
+  "parity_max_abs_diff": 3.337860107421875e-06
+}
