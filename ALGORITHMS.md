@@ -298,15 +298,18 @@ Flags: `--query`, `--link-hint`, `--read-seconds`, `--no-model`, `--temperature`
 After typing the query, the demo reads the address bar back. If Chrome's inline autocomplete swallowed a Backspace, it retypes the query.
 
 **Word demo** (`--process word`):
-1. Open Word from the Start menu, and click **Blank document** on the Start screen with the learned mouse model. Ctrl+N only opens Word's "New" page, so Enter is the fallback.
-2. Maximize, click near the top of the page, and press Ctrl+End. It stops if the document doesn't have keyboard focus.
+1. Note which Word windows are already open, then open Word from the Start menu and wait for a *new* Word window to come to the front, so the demo never types into a document that was already open. If that window shows the **Blank document** tile (the Start screen), click it with the learned mouse model and wait for the tile to disappear; Enter is the fallback. Window titles are not used to detect the Start screen: with another document open, it is already titled "Document2 - Word".
+2. Maximize that window, click near the top of the page, and press Ctrl+End. It stops if the document doesn't have keyboard focus.
 3. Type the paragraph in compose mode: typos and corrections, thinking pauses, changed wordings, arrowing back to fix things.
 4. Read the document text back through UI Automation (`TextPattern`) and report whether it matches. Curly quotes from AutoCorrect count as a match. The document is left open and unsaved.
 
 | Function | Description |
 |---|---|
 | `run_word_demo(hm, args)` | The steps above. |
-| `word_document(timeout)` | `(window, document control)` for the open Word document (the "Page 1 content" `DocumentControl`). |
+| `word_window_handles()` | Handles of every open Word window (class `OpusApp`). |
+| `foreground_word_window(timeout, ignore)` | The Word window in front, skipping the handles in `ignore`. |
+| `word_blank_document_tile(win, timeout)` | The "Blank document" tile if the window shows the Start screen, else None. |
+| `word_document(win, timeout)` | `(window, document control)`: the editing surface, a `DocumentControl` named after the document. |
 | `word_document_has_focus(doc)` | True if keyboard input would go into the document. |
 | `word_document_text(doc)` | The document's text (paragraphs end in `\r`), or None. |
 | `WORD_PARAGRAPH` | The built-in 153-word paragraph. |

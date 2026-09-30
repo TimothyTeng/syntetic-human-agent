@@ -27,6 +27,7 @@ Abort at any time by slamming the mouse into a screen corner.
 """
 
 import argparse
+import ctypes
 import sys
 import time
 
@@ -35,7 +36,7 @@ import uiautomation as auto
 
 from algorithms import human_typing, reading
 from algorithms.human_mouse import HumanMouse
-from controller import apps, browser, keyboard, office, ui_elements
+from controller import browser, keyboard, office, ui_elements
 
 T0 = time.monotonic()
 
@@ -277,16 +278,53 @@ WORD_PARAGRAPH = (
 _QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
 
 
-def word_document(timeout=10):
-    """The editing surface ('Page 1 content') of the foreground Word document, or None."""
-    win = ui_elements.get_window(" - Word", timeout=timeout)
+WORD_WINDOW_CLASS = "OpusApp"
+
+
+def word_window_handles():
+    """Handles of every open Word window (any state: minimised, Start screen, document)."""
+    return {w.NativeWindowHandle for w in auto.GetRootControl().GetChildren()
+            if w.ClassName == WORD_WINDOW_CLASS}
+
+
+def foreground_word_window(timeout=30, ignore=()):
+    """
+    The Word window that is in front, as a UIA control (None on timeout).
+    ignore: handles to skip - pass the Word windows that were already open so only
+            the newly launched one is accepted.
+
+    Window titles can't tell Word's states apart: with another document open, the
+    Start screen of a new window is already titled "Document2 - Word".
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            win = auto.GetForegroundControl().GetTopLevelControl()
+        except Exception:
+            win = None
+        if win is not None and win.ClassName == WORD_WINDOW_CLASS and win.NativeWindowHandle not in ignore:
+            return win
+        time.sleep(0.25)
+    return None
+
+
+def word_blank_document_tile(win, timeout=4):
+    """The 'Blank document' tile if `win` is showing Word's Start screen, else None."""
+    tile = auto.ListItemControl(searchFromControl=win, searchDepth=10, Name="Blank document")
+    if tile.Exists(maxSearchSeconds=timeout, searchIntervalSeconds=0.25) and ui_elements.is_visible(tile):
+        return tile
+    return None
+
+
+def word_document(win=None, timeout=10):
+    """(window, editing surface) of a Word window (default: the one in front). The
+    surface is a DocumentControl named after the document, e.g. 'Document1'."""
+    win = win or foreground_word_window(timeout)
     if not win:
         return None, None
-    doc = auto.DocumentControl(searchFromControl=win, SubName="Page")
+    doc = auto.DocumentControl(searchFromControl=win)
     if not doc.Exists(maxSearchSeconds=timeout, searchIntervalSeconds=0.25):
-        doc = auto.DocumentControl(searchFromControl=win)
-        if not doc.Exists(maxSearchSeconds=2, searchIntervalSeconds=0.25):
-            return win, None
+        return win, None
     return win, doc
 
 
@@ -295,7 +333,7 @@ def word_document_has_focus(doc):
     focused = auto.GetFocusedControl()
     if focused is None or doc is None:
         return False
-    if " - Word" not in apps.get_active_window_title():
+    if foreground_word_window(timeout=0.5) is None:
         return False
     return focused.ControlType == auto.ControlType.DocumentControl or focused.ClassName == "_WwG"
 
@@ -321,28 +359,33 @@ def run_word_demo(hm, args):
             text = f.read().strip()
 
     # 1. Word + blank document
+    already_open = word_window_handles()       # never type into a document that was already open
     log("Opening Word")
-    if not office.open_word():
-        sys.exit("Word window did not appear")
+    office.open_word()
+    win = foreground_word_window(timeout=30, ignore=already_open)
+    if win is None:
+        sys.exit("A new Word window did not appear")
     time.sleep(2.0)                            # Word's Start screen needs a moment to settle
-    if not apps.find_windows(" - Word"):       # on the Start screen: click "Blank document"
-        start = ui_elements.get_window("Word", timeout=5)
-        blank = ui_elements.find_element(start, "Blank document", timeout=5) if start else None
-        if blank is not None:
-            log("Clicking 'Blank document'")
-            think(rng, 0.8)                    # a person glances over the Start screen first
-            hm.click_rect(ui_elements.element_rect(blank))
-        else:
-            log("'Blank document' not found - pressing Enter")
-            office.new_blank_from_start_screen()
-    if not apps.wait_for_window(" - Word", timeout=20):
-        sys.exit("Blank Word document did not open")
+    tile = word_blank_document_tile(win)
+    if tile is not None:                       # Start screen: click "Blank document"
+        log("Clicking 'Blank document'")
+        think(rng, 0.8)                        # a person glances over the Start screen first
+        hm.click_rect(ui_elements.element_rect(tile))
+        deadline = time.time() + 20
+        while word_blank_document_tile(win, timeout=0) is not None:
+            if time.time() > deadline:
+                log("Start screen still showing - pressing Enter")
+                office.new_blank_from_start_screen()
+                break
+            time.sleep(0.25)
+    else:
+        log("No Start screen - Word opened straight into a document")
     time.sleep(1.0)
-    apps.maximize_window(" - Word")
+    ctypes.windll.user32.ShowWindow(win.NativeWindowHandle, 3)     # SW_MAXIMIZE, this window only
     time.sleep(1.0)
 
     # 2. Click into the page, like a person would, then make sure typing goes there
-    win, doc = word_document()
+    win, doc = word_document(win)
     if doc is None:
         sys.exit("Couldn't find the Word document area")
     l, t, r, b = ui_elements.element_rect(doc)
@@ -354,7 +397,7 @@ def run_word_demo(hm, args):
     keyboard.hotkey("ctrl", "end")             # caret at the end of the (empty) document
     if not word_document_has_focus(doc):
         log("Document not focused after click - activating Word")
-        apps.focus_window(" - Word")
+        win.SetActive()
         time.sleep(0.5)
         if not word_document_has_focus(doc):
             sys.exit("The Word document doesn't have keyboard focus - stopping before typing anything")
@@ -364,7 +407,7 @@ def run_word_demo(hm, args):
     log(f"Typing {words} words at a {args.wpm:.0f} wpm persona (revisions: {args.revisions})")
     t0 = time.monotonic()
     plan = human_typing.type_like_human(text, rng=rng, wpm=args.wpm, mode="compose",
-                                        revisions=args.revisions, pause_scale=args.pause_scale)
+                                        revisions=args.revisions, pause_scale=args.pause_scale, max_pause=4.0)
     took = time.monotonic() - t0
     tags = {tag: sum(1 for k in plan if k.tag == tag) for tag in ("typo", "fix", "false_start", "lost", "nav")}
     log(f"Typed in {took:.0f} s = {len(text) / 5 / (took / 60):.0f} wpm effective "
