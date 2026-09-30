@@ -1,0 +1,22 @@
+{
+  "args": {
+    "data": "data/aalto_keystrokes/Keystrokes.zip",
+    "out": "models",
+    "participants": 4000,
+    "val_participants": 300,
+    "epochs": 20,
+    "batch": 128,
+    "units": 128,
+    "layers": 2,
+    "mixtures": 8,
+    "emb": 16,
+    "lr": 0.002,
+    "seed": 0
+  },
+  "n_train": 52722,
+  "n_val": 3953,
+  "final_loss": 1.7007882595062256,
+  "best_val_loss": 1.742937445640564,
+  "parity_max_abs_diff": 1.430511474609375e-06,
+  "wpm_scale": 1.1181772947311401
+}

@@ -1,14 +1,20 @@
 # Algorithms — Behaviour Layer Reference
 
-`controller/` knows **what** can be done: move to (x, y), click, type. `algorithms/` decides **how** a person would do it: the path the mouse takes, how fast, how long the button stays down, and how someone scrolls while reading. `main.py` runs a Chrome demo that uses both.
+`controller/` knows **what** can be done: move to (x, y), click, type. `algorithms/` decides **how** a person would do it: the path the mouse takes, how fast, how long the button stays down, how someone scrolls while reading, and how they type (rhythm, typos, pauses, changes of mind). `main.py` runs two demos: a Chrome search and a Word document.
+
+Detailed guides for the two learned models (training process, design considerations, file-by-file function rundown, usage examples, results):
+- [`algorithms/mouse_model/README.md`](algorithms/mouse_model/README.md)
+- [`algorithms/typing_model/README.md`](algorithms/typing_model/README.md)
 
 ```
 main.py ──► algorithms.HumanMouse ──► mouse_model (trained LSTM-MDN, numpy runtime)
         │                          ──► click_stats (learned click timing)
         │                          ──► targeting / player ──► controller.mouse
         ├─► algorithms.reading ─────► HumanMouse + controller.mouse.scroll
-        ├─► algorithms.human_typing ► controller.keyboard
-        └─► controller.browser / apps / ui_elements (find targets on screen)
+        ├─► algorithms.human_typing ► typing_model (planner + learned timing, typos, pauses)
+        │                          ──► controller.keyboard (key_down / key_up timeline)
+        ├─► controller.browser / apps / ui_elements (find targets on screen)
+        └─► controller.office (Word demo: open Word, blank document)
 ```
 
 ---
@@ -18,19 +24,28 @@ main.py ──► algorithms.HumanMouse ──► mouse_model (trained LSTM-MDN,
 ```bash
 pip install -r requirements.txt
 
-# 1) dataset: the BMDD split archive (boun-mouse-dynamics-dataset.zip + .z01-.z09) in the
-#    project root is read directly - no extraction needed (see data/README.md)
+# 1) dataset: the BMDD split archive (data/BMDD/boun-mouse-dynamics-dataset.zip + .z01-.z09)
+#    is read directly - no extraction needed (see data/README.md)
 
 # 2) train (CPU). Smoke run first, then the real run (~5 min/epoch for 40k strokes)
-python -m algorithms.mouse_model.train --data boun-mouse-dynamics-dataset.zip --out models --max-strokes 5000 --epochs 1
-python -m algorithms.mouse_model.train --data boun-mouse-dynamics-dataset.zip --out models --window-filter browsing --max-strokes 40000 --epochs 25
+python -m algorithms.mouse_model.train --data data/BMDD/boun-mouse-dynamics-dataset.zip --out models --max-strokes 5000 --epochs 1
+python -m algorithms.mouse_model.train --data data/BMDD/boun-mouse-dynamics-dataset.zip --out models --window-filter browsing --max-strokes 40000 --epochs 25
 
 # 3) check realism against held-out real strokes (BMDD test folders)
-python -m algorithms.mouse_model.evaluate --data boun-mouse-dynamics-dataset.zip --window-filter browsing
+python -m algorithms.mouse_model.evaluate --data data/BMDD/boun-mouse-dynamics-dataset.zip --window-filter browsing
 
-# 4) run the Chrome demo (works before training too; it uses the fallback generator)
-python main.py
+# 4) typing model (datasets in data/, see data/README.md). Statistics first (~1 min), then the
+#    optional neural timing model (~1-2 min/epoch on CPU), then checks.
+python -m algorithms.typing_model.fit_stats --aalto data/aalto_keystrokes/Keystrokes.zip --klicke data/klicke/linking-writing-processes-to-writing-quality.zip
+python -m algorithms.typing_model.train --data data/aalto_keystrokes/Keystrokes.zip
+python -m algorithms.typing_model.selftest
+python -m algorithms.typing_model.evaluate --aalto data/aalto_keystrokes/Keystrokes.zip --klicke data/klicke/linking-writing-processes-to-writing-quality.zip
+
+# 5) run the demos (they work before training too, using fallbacks / built-in defaults)
+python main.py                                    # Chrome search demo
 python main.py --no-model --query "wikipedia" --read-seconds 20 --seed 42
+python main.py --process word                     # type a paragraph into a new Word document (80 wpm)
+python main.py --process word --wpm 55 --text-file notes.txt --pause-scale 0.4
 ```
 
 Abort `main.py` at any time by slamming the mouse into a screen corner (the pyautogui fail-safe).
@@ -38,6 +53,8 @@ Abort `main.py` at any time by slamming the mouse into a screen corner (the pyau
 ---
 
 ## 2. The mouse model
+
+Full guide: [`algorithms/mouse_model/README.md`](algorithms/mouse_model/README.md).
 
 ### Why deep learning, and not reinforcement learning?
 RL needs a reward, and there is no natural reward for "moves like a human". What we have is **recorded human data**, so the right tool is a **generative sequence model** trained to imitate it by maximum likelihood.
@@ -110,7 +127,86 @@ It also fits a Fitts-style line, T = a + b·log2(D+1), for each source. `--plot 
 
 ---
 
-## 3. Function reference
+## 3. The typing model
+
+Full guide: [`algorithms/typing_model/README.md`](algorithms/typing_model/README.md).
+
+Typing is split into two layers, as in writing research:
+- the **motor** layer: how fast each key follows the previous one, how long it is held, and the typos fingers make;
+- the **cognitive** layer: where the writer stops to think, deletes and rewrites, or goes back to fix something.
+
+### Datasets (see `data/README.md`)
+| Dataset | What it teaches | Why it fits |
+|---|---|---|
+| **Aalto 136M Keystrokes** (168k typists copying sentences) | Per-key intervals and hold times by bigram, Shift timing, typo types and how they are corrected | Real press/release times plus the target sentence, so every typo and Backspace can be labelled exactly |
+| **KLiCKe** (Kaggle *Linking Writing Processes*, 2.5k essays written freely in 30 min) | Pauses by location (in word, between words, after a clause or sentence), deletion sizes, lost-thought deletions, in-text revisions | Real composition, not copying. Letters are masked as `q` but spaces and punctuation survive, so boundaries can still be recovered |
+
+### Pipeline (`algorithms/typing_model/`)
+1. **Planner** (`planner.py`, pass 1) decides *which keys* to press. It types the target at the end of the text and keeps a virtual buffer, so the final text is always exactly the target. On the way it injects:
+   - **typos** (`errors.py`): adjacent key, omission, doubled key, transposition, case slip. The typist notices after 0–n more keys (at most to the end of the next word), then backspaces, sometimes over-deleting;
+   - **false starts / changes of idea** (compose mode): type a different wording from an *alternatives provider*, pause, delete back to where it diverged;
+   - **lost train of thought**: a long pause, then delete the last few characters and retype;
+   - **in-text revisions**: leave a wrong or missing word, or an unnoticed typo; keep writing; arrow back (at most 60 chars), fix it, arrow forward.
+2. **Alternatives** (`alternatives.py`): `heuristic` (default, offline: synonym swaps, sentence openers, anticipating the next word, abandoned partial words) or `llm` (one Claude call before typing returns first-draft phrasings anchored in the text; any failure falls back to heuristics).
+3. **Timing** (`planner.py`, pass 2) decides *when*. Each key gets (interval since the previous press, hold) from the motor timer. In compose mode the interval at word, clause and sentence boundaries is replaced by a pause sampled from KLiCKe.
+   - `timing.BigramTimer`: per-bigram quantiles of interval / typist median, AR(1) tempo drift, persona variation between typists (hold level, rhythm spread).
+   - `sampler.TypingMDN`: 2×128 LSTM + 8-component MDN over (log interval, log hold), conditioned on the previous, current and next key and on the typist's speed. Trained in TensorFlow, run in numpy.
+4. **Player** (`human_typing.py`): turns the plan into a `key_down` / `key_up` timeline. Keys can overlap (rollover), and Shift goes down a learned lead time before a capital and comes up after it. The timeline is executed with sub-millisecond waits, and any held key is released in a `finally`. Characters the layout cannot press directly are typed atomically.
+
+Modes: `transcribe` for short inputs (search boxes, fields; rhythm + typos only) and `compose` for longer text (everything). The default picks compose from 12 words up.
+
+### Calibration and checks
+- `fit_stats.py` simulates the fitted model on real sentences and scales the typo rate until generated typing uses as many Backspaces per key as real typists did. The generator always fixes its typos, while about 15% of real ones are left.
+- `selftest.py` replays random plans through a simulated keyboard (Shift state included) and checks the result is exactly the target.
+- `evaluate.py` re-types held-out real sentences at each typist's own speed and on their browser's clock resolution. It reports KS distances and a real-vs-synthetic classifier AUC.
+
+### Current model
+**Statistics** (`fit_stats.py`, about 1 min):
+- **Motor:** 5,367 Aalto typists (3.8M keystrokes) produced 762 bigram tables.
+- **Typos:** typo rate calibrated ×0.67 (e.g. 2.8%/key at 45 wpm, 1.3% at 105 wpm).
+- **Composition:** all 2,471 KLiCKe essays.
+
+**Neural timing** (`models/typing_mdn.npz`, 860 KB):
+- **Training:** 4,000 typists, 52,722 sentences, 20 epochs on CPU (~1 min each). Best validation NLL 1.743; numpy/TF parity 1.4e-6.
+- **Speed calibration:** `wpm_scale` = 1.118, so a 45-wpm persona really types at about 46 wpm.
+
+**Motor realism.** 810 held-out sentences from 150 unseen typists, each re-typed at that typist's measured speed and clock resolution. KS: 0 = same distribution as real. AUC: 0.5 = a gradient-boosting detector cannot tell generated from real.
+
+| Generator | interval KS | hold KS | speed KS | Backspace-rate KS | rollover KS | tempo lag-1 KS | **detector AUC** |
+|---|---|---|---|---|---|---|---|
+| old placeholder | 0.47 | 1.00 | 0.58 | 0.60 | 0.87 | 0.19 | **1.00** |
+| built-in defaults (no data) | 0.20 | 0.47 | 0.10 | 0.05 | 0.63 | 0.38 | **0.99** |
+| bigram statistics | 0.06 | 0.03 | 0.07 | 0.05 | 0.13 | 0.09 | **0.66** |
+| **LSTM-MDN** (default) | **0.011** | **0.024** | **0.038** | **0.028** | **0.059** | **0.063** | **0.52** |
+
+**Composition realism.** 100 KLiCKe essays re-typed in compose mode at essay-level pause settings (`pause_scale=1.0`). The share of keystrokes preceded by a pause of 2 s or more:
+
+| Location | real | generated |
+|---|---|---|
+| inside a word | 0.2% | 0.0% |
+| between words | 6.4% | 7.6% |
+| after a clause | 10.1% | 16.0% |
+| after a sentence | 40.2% | 43.8% |
+| before a deletion | 12.0% | 17.8% |
+
+Deletion runs per 100 chars: real 3.3, generated 3.9. In-text revisions per 1,000 chars: real 1.3, generated 1.7.
+
+**Correctness and live test:**
+- **`selftest`:** 0 mismatches in 600 plans, both at the plan level and on the simulated keyboard.
+- **Live typing:** typing into a real window gave the exact final text, including 11 and 17 Backspaces and 4–6 Shift presses. Delivered key timing was within **0.1–0.2 ms** of the plan (median; p95 < 2 ms).
+
+**Runtime:**
+- Planning takes about 5 ms per sentence and about 40 ms for an email.
+- numpy only; TensorFlow is never imported at runtime.
+- The default email pace (`pause_scale=0.7`) comes out at about 30 wpm effective for a 55-wpm persona. That is realistic for composing, since thinking pauses dominate.
+
+**Known gaps:**
+- Clause-final pauses and pauses before deletions are a little too frequent.
+- The Aalto data is sentence *copying*, so motor timing in free composition is inferred rather than measured.
+
+---
+
+## 4. Function reference
 
 ### `algorithms/human_mouse.py` — `HumanMouse`
 | Member | Description |
@@ -164,10 +260,29 @@ It also fits a Fitts-style line, T = a + b·log2(D+1), for each source. `--plot 
 ### `algorithms/human_typing.py`
 | Function | Description |
 |---|---|
-| `type_like_human(text, rng=None, wpm=45, sigma=0.35)` | **Placeholder:** log-normal per-key delays, with longer gaps after spaces and punctuation. To be replaced by a learned keystroke model. |
+| `type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="heuristic", allow_uncorrected=False, error_scale=1.0, revision_scale=1.0, pause_scale=0.7, max_pause=8.0, dry_run=False)` | Plans and types `text` into the focused window and returns the plan. `wpm` = speed persona; `sigma` scales timing variability (0.35 = typical); `mode` = `"transcribe"` / `"compose"` / auto; `revisions="llm"` asks Claude for first-draft wordings. `pause_scale=1.0` gives timed-essay thinking pauses, which feel slow for emails. |
+| `play(plan, rng)` / `build_timeline(plan, rng)` | Executes a plan, or builds its `key_down` / `key_up` event list. |
+| `get_model()` | The loaded `TypingModel` (cached). |
+
+### `algorithms/typing_model/`
+| Function / class | Description |
+|---|---|
+| `planner.plan_keystrokes(text, model, rng, cfg, provider)` | Text → list of `Keystroke(key, tag, press, hold, iki, pclass, long)`. `tag` is one of type / typo / cont / fix / false_start / lost / nav / revise. |
+| `planner.TypingConfig` | All knobs: `wpm, mode, temperature, error_scale, revision_scale, pause_scale, max_pause, allow_uncorrected, intext_revisions, p_late_notice, max_travel`. |
+| `runtime.TypingModel.load(models_dir, use_mdn=True)` | Loads the timer (MDN → bigrams → defaults), `ErrorStats` and `CompositionStats`, each with fallbacks. `.sources` says what was loaded. |
+| `runtime.apply_plan(plan)` / `describe(plan)` | Replay a plan into text / print a readable trace (`~` = Backspace, `<` `>` = arrows, `[2.1s]` = long pause). |
+| `timing.BigramTimer.fit/load/session(wpm, rng).sample(prev, key, next)` | Empirical motor timing. |
+| `sampler.TypingMDN.load(path).session(...)` | Neural motor timing (numpy). |
+| `errors.ErrorStats` / `errors.make_typo(target, j, type, rng)` | Typo rates by speed, type mix, detection delay, over-deletion. |
+| `composition.CompositionStats.sample_pause(class, base_iki, rng)` / `pause_class(...)` | Composition pauses and revision rates. |
+| `alternatives.HeuristicAlternatives` / `LLMAlternatives(model=..., timeout=20)` | Change-of-idea wording providers. The LLM model defaults to `claude-opus-5` (override with the `TYPING_ALT_MODEL` env var) and uses server-side refusal fallbacks. |
+| `dataset_aalto.iter_participants(zip, split, max_participants)` / `dataset_klicke.iter_essays(path, max_essays)` | Streaming loaders (zip read in place). |
+| `fit_stats.main()` / `train.main()` / `evaluate.main()` / `selftest.run()` | CLI entry points; see Quick start. |
 
 ### `main.py`
-The Chrome demo:
+Two demos, chosen with `--process search` (default) or `--process word`.
+
+**Chrome search demo:**
 1. Open Chrome from the Start menu. If the "Who's using Chrome?" picker appears, move to the chosen profile card with the learned mouse model and click it. Then maximize the browser.
 2. Move to the address bar and click; type the query; press Enter.
 3. Click a result, preferring one that contains the query.
@@ -180,9 +295,29 @@ Flags: `--query`, `--link-hint`, `--read-seconds`, `--no-model`, `--temperature`
 - `--profile-index N`: which match to use when several cards share the name.
 - `--list-profiles`: print the picker's profiles with their index, then exit.
 
+After typing the query, the demo reads the address bar back. If Chrome's inline autocomplete swallowed a Backspace, it retypes the query.
+
+**Word demo** (`--process word`):
+1. Open Word from the Start menu, and click **Blank document** on the Start screen with the learned mouse model. Ctrl+N only opens Word's "New" page, so Enter is the fallback.
+2. Maximize, click near the top of the page, and press Ctrl+End. It stops if the document doesn't have keyboard focus.
+3. Type the paragraph in compose mode: typos and corrections, thinking pauses, changed wordings, arrowing back to fix things.
+4. Read the document text back through UI Automation (`TextPattern`) and report whether it matches. Curly quotes from AutoCorrect count as a match. The document is left open and unsaved.
+
+| Function | Description |
+|---|---|
+| `run_word_demo(hm, args)` | The steps above. |
+| `word_document(timeout)` | `(window, document control)` for the open Word document (the "Page 1 content" `DocumentControl`). |
+| `word_document_has_focus(doc)` | True if keyboard input would go into the document. |
+| `word_document_text(doc)` | The document's text (paragraphs end in `\r`), or None. |
+| `WORD_PARAGRAPH` | The built-in 153-word paragraph. |
+
+Word flags: `--wpm` (default 80), `--text`, `--text-file`, `--revisions heuristic|llm`, `--pause-scale` (default 0.7), plus `--seed`, `--no-model` and `--temperature` for the mouse.
+
+Measured run (80 wpm persona, 153 words): 271 s including thinking pauses (40 wpm effective); 1,222 keystrokes with 24 typos; the document text matched exactly.
+
 ---
 
-## 4. What is learned vs. hand-set
+## 5. What is learned vs. hand-set
 
 | Behaviour | Source |
 |---|---|
@@ -190,10 +325,14 @@ Flags: `--query`, `--link-hint`, `--read-seconds`, `--no-model`, `--temperature`
 | Click hold time and pre-click dwell | **Learned** (empirical from data) |
 | Where inside an element to click | Parametric; the datasets have no element boundaries |
 | Scroll bursts and reading pauses | Hand-set (`ReadingParams`); next candidate to learn. Balabit has scroll events. |
-| Typing rhythm | Hand-set placeholder |
+| Typing rhythm: key intervals, holds, rollover, Shift timing, typist-to-typist variation | **Learned** (Aalto: bigram statistics, or LSTM-MDN) |
+| Typos, when they are noticed, how they are corrected | **Learned** (Aalto), rate calibrated by simulation |
+| Thinking pauses, deletion sizes, lost-thought deletions, in-text revision rate and distance | **Learned** (KLiCKe) |
+| *What* the changed wording is | Heuristic (synonyms, openers, anticipation) or LLM (`revisions="llm"`) |
+| Arrow-key auto-repeat rate, 60-char revision reach, `pause_scale` default 0.7 | Hand-set |
 
-## 5. Next steps
+## 6. Next steps
 - Compare the browsing-only model with a general one trained without `--window-filter`, using `evaluate.py`.
 - Learn scroll timing from Balabit's `Scroll` events, to replace the `ReadingParams` defaults.
-- A keystroke-dynamics model for typing, e.g. from a public keystroke dataset, behind the same `type_like_human` signature.
+- Typing: verify the field's final text after typing into fields that autocomplete (Chrome omnibox inline completion, Word autocorrect), where Backspace can behave differently; mine CoAuthor's real rewrites to improve the heuristic alternatives; learn word-level ctrl+Backspace from free-text data (e.g. Clarkson II).
 - A session scheduler that strings tasks together (Word, email, browsing) for the 15-minute run.

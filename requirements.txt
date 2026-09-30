@@ -6,3 +6,11 @@ pillow>=10.0             # screenshots
 psutil>=5.9              # check running processes
 # Optional OCR fallback (also needs the Tesseract-OCR program installed):
 # pytesseract>=0.3.10
+numpy>=1.26              # runtime maths (mouse + typing models)
+# --- training / fitting / evaluation only (not needed to run the agent) ---
+# pandas>=2.0            # dataset loaders
+# tensorflow>=2.16       # training the LSTM-MDN models
+# scipy>=1.11            # evaluate.py (KS statistics)
+# scikit-learn>=1.3      # typing evaluate.py (real-vs-synthetic detector)
+# --- optional: typing "change of idea" wording from Claude (revisions="llm") ---
+# anthropic>=0.60

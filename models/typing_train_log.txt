@@ -1,0 +1,80 @@
+2026-09-30 16:46:51.728977: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-30 16:46:52.394152: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-30 16:47:07.656403: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+  aalto: read 1000/4000 participants
+  aalto: read 2000/4000 participants
+  aalto: read 3000/4000 participants
+  aalto: read 4000/4000 participants
+Train 52722 sentences (3583 typists), val 3953 (269 typists), 2406910 train steps [13s]
+Model: "typing_mdn"
+┌─────────────────────┬───────────────────┬────────────┬───────────────────┐
+│ Layer (type)        │ Output Shape      │    Param # │ Connected to      │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ tokens (InputLayer) │ (None, None, 3)   │          0 │ -                 │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ emb (Embedding)     │ (None, None, 3,   │        848 │ tokens[0][0]      │
+│                     │ 16)               │            │                   │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ reshape (Reshape)   │ (None, None, 48)  │          0 │ emb[0][0]         │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ floats (InputLayer) │ (None, None, 4)   │          0 │ -                 │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ concatenate         │ (None, None, 52)  │          0 │ reshape[0][0],    │
+│ (Concatenate)       │                   │            │ floats[0][0]      │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ lstm0 (LSTM)        │ (None, None, 128) │     92,672 │ concatenate[0][0] │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ lstm1 (LSTM)        │ (None, None, 128) │    131,584 │ lstm0[0][0]       │
+├─────────────────────┼───────────────────┼────────────┼───────────────────┤
+│ mdn (Dense)         │ (None, None, 40)  │      5,160 │ lstm1[0][0]       │
+└─────────────────────┴───────────────────┴────────────┴───────────────────┘
+ Total params: 230,264 (899.47 KB)
+ Trainable params: 230,264 (899.47 KB)
+ Non-trainable params: 0 (0.00 B)
+Epoch 1/20
+C:\Users\Timothy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\LocalCache\local-packages\Python312\site-packages\keras\src\models\functional.py:225: UserWarning: The structure of `inputs` doesn't match the expected structure: ['tokens', 'floats']. Received: the structure of inputs=('*', '*')
+  warnings.warn(
+C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\contextlib.py:158: UserWarning: Your input ran out of data; interrupting training. Make sure that your dataset or generator can generate at least `steps_per_epoch * epochs` batches. You may need to use the `.repeat()` function when building your dataset.
+  self.gen.throw(value)
+412/412 - 61s - 148ms/step - loss: 2.1388 - val_loss: 1.9905 - learning_rate: 0.0020
+Epoch 2/20
+412/412 - 65s - 157ms/step - loss: 1.9248 - val_loss: 1.8608 - learning_rate: 0.0020
+Epoch 3/20
+412/412 - 70s - 171ms/step - loss: 1.8551 - val_loss: 1.8245 - learning_rate: 0.0020
+Epoch 4/20
+412/412 - 62s - 151ms/step - loss: 1.8223 - val_loss: 1.8077 - learning_rate: 0.0020
+Epoch 5/20
+412/412 - 71s - 172ms/step - loss: 1.8008 - val_loss: 1.7882 - learning_rate: 0.0020
+Epoch 6/20
+412/412 - 77s - 186ms/step - loss: 1.7850 - val_loss: 1.7801 - learning_rate: 0.0020
+Epoch 7/20
+412/412 - 70s - 169ms/step - loss: 1.7730 - val_loss: 1.7716 - learning_rate: 0.0020
+Epoch 8/20
+412/412 - 66s - 160ms/step - loss: 1.7625 - val_loss: 1.7663 - learning_rate: 0.0020
+Epoch 9/20
+412/412 - 60s - 146ms/step - loss: 1.7537 - val_loss: 1.7559 - learning_rate: 0.0020
+Epoch 10/20
+412/412 - 63s - 152ms/step - loss: 1.7465 - val_loss: 1.7588 - learning_rate: 0.0020
+Epoch 11/20
+412/412 - 60s - 146ms/step - loss: 1.7306 - val_loss: 1.7488 - learning_rate: 1.0000e-03
+Epoch 12/20
+412/412 - 64s - 155ms/step - loss: 1.7263 - val_loss: 1.7475 - learning_rate: 1.0000e-03
+Epoch 13/20
+412/412 - 60s - 145ms/step - loss: 1.7228 - val_loss: 1.7513 - learning_rate: 1.0000e-03
+Epoch 14/20
+412/412 - 62s - 149ms/step - loss: 1.7139 - val_loss: 1.7442 - learning_rate: 5.0000e-04
+Epoch 15/20
+412/412 - 53s - 129ms/step - loss: 1.7117 - val_loss: 1.7439 - learning_rate: 5.0000e-04
+Epoch 16/20
+412/412 - 86s - 208ms/step - loss: 1.7098 - val_loss: 1.7441 - learning_rate: 5.0000e-04
+Epoch 17/20
+412/412 - 84s - 203ms/step - loss: 1.7049 - val_loss: 1.7439 - learning_rate: 2.5000e-04
+Epoch 18/20
+412/412 - 51s - 125ms/step - loss: 1.7020 - val_loss: 1.7436 - learning_rate: 1.2500e-04
+Epoch 19/20
+412/412 - 94s - 229ms/step - loss: 1.7014 - val_loss: 1.7429 - learning_rate: 1.2500e-04
+Epoch 20/20
+412/412 - 93s - 226ms/step - loss: 1.7008 - val_loss: 1.7432 - learning_rate: 1.2500e-04
+Saved models\typing_mdn.npz
+Numpy/TensorFlow parity: max abs diff 1.43e-06 -> OK
