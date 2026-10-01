@@ -73,8 +73,16 @@ def main(argv=None):
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--plot", default=None, help="save example trajectories + speed profiles to this PNG")
+    ap.add_argument("--resample-hz", type=float, default=None,
+                    help="fill generated strokes up to this polling rate, as playback does (e.g. 100)")
     args = ap.parse_args(argv)
     rng = np.random.default_rng(args.seed)
+
+    def as_played(start, traj):
+        if args.resample_hz:
+            from algorithms.player import resample  # imported lazily: it pulls in the controller
+            traj = resample(traj, start, args.resample_hz, rng=rng)
+        return trajectory_to_arrays(start, traj)
 
     real = []
     for sess in iter_sessions(args.dataset, args.data, split=args.split, seed=args.seed):
@@ -97,13 +105,13 @@ def main(argv=None):
     for s in real:
         start, end = s.points[0], s.points[-1]
         rows["real"].append(stroke_metrics(s.points, s.times))
-        rows["fallback"].append(stroke_metrics(*trajectory_to_arrays(start, fallback.generate(start, end, rng))))
+        rows["fallback"].append(stroke_metrics(*as_played(start, fallback.generate(start, end, rng))))
         if model:
             traj = model.generate(start, end, rng, temperature=args.temperature)
             if traj is None:
                 failures += 1
                 continue
-            m_pts, m_times = trajectory_to_arrays(start, traj)
+            m_pts, m_times = as_played(start, traj)
             rows["model"].append(stroke_metrics(m_pts, m_times))
             if len(examples) < 6:
                 examples.append((s.points, s.times, m_pts, m_times))

@@ -29,20 +29,28 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models", "mouse_mdn.npz")
 DEFAULT_STATS = os.path.join(PROJECT_ROOT, "models", "click_stats.json")
 
+# Playback polling rate. 100 Hz with the whole-pixel cap in player.resample() brings
+# the model's mean sample spacing (~17 ms) to ~11 ms, close to real strokes (~12 ms).
+RESAMPLE_HZ = 100
+MIN_MODEL_DIST = 15     # px; shorter moves (corrections) use the fallback generator
+
 
 class HumanMouse:
     def __init__(self, model_path=DEFAULT_MODEL, stats_path=DEFAULT_STATS, use_model=True,
-                 temperature=1.0, speed=1.0, seed=None):
+                 temperature=1.0, speed=1.0, seed=None, resample_hz=RESAMPLE_HZ):
         """
         model_path:  trained .npz from train.py (ignored if missing or use_model=False).
         stats_path:  click_stats.json from train.py (defaults used if missing).
         temperature: model sampling temperature (<1 calmer, >1 more varied).
         speed:       playback speed multiplier (1 = recorded human speed).
         seed:        random seed for reproducible runs (None = random).
+        resample_hz: fill coarse model samples up to this polling rate during playback
+                     (None = play the model's samples as generated).
         """
         self.rng = np.random.default_rng(seed)
         self.temperature = temperature
         self.speed = speed
+        self.resample_hz = resample_hz
         self.model = None
         if use_model and os.path.exists(model_path):
             from .mouse_model.sampler import MouseModel  # numpy only
@@ -59,7 +67,8 @@ class HumanMouse:
     def plan(self, start, end):
         """Generate (but don't play) a trajectory [(x, y, dt), ...] from start to end."""
         traj = None
-        if self.model:
+        # the model never saw moves under 15 px (filtered out in training): use the fallback
+        if self.model and np.hypot(end[0] - start[0], end[1] - start[1]) >= MIN_MODEL_DIST:
             traj = self.model.generate(start, end, self.rng, temperature=self.temperature)
         if traj is None:  # no model, or model failed to reach the target
             traj = fallback.generate(start, end, self.rng)
@@ -71,11 +80,25 @@ class HumanMouse:
         if np.hypot(x - start[0], y - start[1]) < 2:
             mouse.move_to(x, y)
             return
-        player.play_trajectory(self.plan(start, (x, y)), speed=self.speed)
+        player.play_trajectory(self.plan(start, (x, y)), speed=self.speed,
+                               resample_hz=self.resample_hz, rng=self.rng)
 
     def move_to_rect(self, rect):
-        """Move to a human-chosen point inside rect (left, top, right, bottom). Returns the point."""
+        """
+        Move to a human-chosen point inside rect (left, top, right, bottom). Returns the point.
+
+        The primary movement lands with distance-dependent scatter
+        (targeting.primary_aim); if that is outside the element (common for small
+        buttons, rare for big ones), the person notices and makes a short correction.
+        """
         x, y = targeting.pick_click_point(rect, self.rng)
+        start = mouse.get_position()
+        landing = targeting.primary_aim(rect, (x, y), start, self.rng)
+        if targeting.inside(landing, rect, pad=1):
+            self.move_to(x, y)
+            return x, y
+        self.move_to(*landing)
+        time.sleep(float(0.11 * np.exp(self.rng.normal(0, 0.35))))   # see the miss, re-aim
         self.move_to(x, y)
         return x, y
 

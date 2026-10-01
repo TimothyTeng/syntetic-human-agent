@@ -1,18 +1,24 @@
 """
 Chrome demo for the learned mouse model.
 
-  1. Open Chrome (Start menu); if the "Who's using Chrome?" picker appears,
-     move to the chosen profile and click it; maximise the browser window
-  2. Move to the address bar with a learned trajectory and click
+  1. Open Chrome (Start menu: Win key or the Start button); if the "Who's using
+     Chrome?" picker appears, move to the chosen profile and click it; maximise
+  2. Focus the address bar: click it with a learned trajectory, or Ctrl+L
   3. Type a search query and press Enter
   4. Click a search result
-  5. "Read" the page: scroll bursts, pauses and small mouse drifts
-  6. Move to the Back button and click it
+  5. "Read" the page: scroll bursts, pauses, small mouse drifts and now and then
+     following a line of text with the cursor
+  6. Go back: the Back button or Alt+Left
   7. Click a different result and read a little
 
 Word demo (--process word): open Word, start a blank document, click into the page
 and type a paragraph with the learned typing model (typos + corrections, thinking
 pauses, changes of wording, arrowing back to fix things), then check the text.
+
+Both demos act as one simulated person (algorithms.behaviour.Persona, sampled from
+--seed): typing speed, mouse speed, whether they reach for shortcuts or the mouse,
+how long they think and how fast they read. Override single traits with --wpm,
+--pause-scale, --temperature, --shortcut-pref.
 
 Usage:
     python main.py                      # uses models/mouse_mdn.npz if present
@@ -20,7 +26,8 @@ Usage:
     python main.py --query "wikipedia" --read-seconds 20 --seed 42
     python main.py --profile Work --profile-index 1   # 2nd profile matching "Work"
     python main.py --list-profiles                    # print the picker's profiles and exit
-    python main.py --process word                     # type a paragraph into Word at 80 wpm
+    python main.py --process word                     # type a paragraph into Word
+    python main.py --process word --wpm 80            # ... as an 80 wpm typist
     python main.py --process word --wpm 55 --text-file notes.txt --revisions llm
 
 Abort at any time by slamming the mouse into a screen corner.
@@ -31,23 +38,17 @@ import ctypes
 import sys
 import time
 
-import numpy as np
 import uiautomation as auto
 
-from algorithms import human_typing, reading
-from algorithms.human_mouse import HumanMouse
-from controller import browser, keyboard, office, ui_elements
+from algorithms import reading
+from algorithms.behaviour import Human
+from controller import browser, office, ui_elements
 
 T0 = time.monotonic()
 
 
 def log(msg):
     print(f"[{time.monotonic() - T0:6.1f}s] {msg}", flush=True)
-
-
-def think(rng, median=0.6, sigma=0.5):
-    """Short human 'decision' pause between actions (log-normal)."""
-    time.sleep(float(median * np.exp(rng.normal(0, sigma))))
 
 
 def wait_for_navigation(settle=0.8):
@@ -83,22 +84,31 @@ def result_links(links):
     return [k for k in links if "http" in k["name"].lower()]
 
 
-def choose_link(links, rng, hint=None, top_n=8):
+def choose_link(links, human, hint=None, top_n=8):
     """
     Prefer search results over page navigation. With `hint`, take the first
     result containing it; otherwise one of the top results (upper ones likelier).
+    Either way the person spends a moment scanning the list first.
     """
     pool = result_links(links) or links
+    if not pool:
+        return None
     if hint:
         for group in (pool, links):
             matches = [k for k in group if hint.lower() in k["name"].lower()]
             if matches:
+                human.visual_search(min(len(pool), top_n))
                 return matches[0]
-    if not pool:
-        return None
-    candidates = pool[:top_n]
-    weights = 1.0 / (1 + np.arange(len(candidates)))   # people favour the top of the page
-    return candidates[rng.choice(len(candidates), p=weights / weights.sum())]
+    return human.choose(pool, top_n=top_n)
+
+
+def reading_params(human):
+    """Reading behaviour at this person's reading speed."""
+    return reading.ReadingParams(reading_wpm=human.persona.reading_wpm)
+
+
+def log_trace(words):
+    log(f"  traced with the cursor: {' '.join(w['text'] for w in words)[:70]!r}")
 
 
 def describe_profiles(profiles):
@@ -106,12 +116,11 @@ def describe_profiles(profiles):
                      for p in profiles)
 
 
-def choose_profile(hm, name, index):
+def choose_profile(human, name, index):
     """
     On the profile picker, move to the requested profile card with the learned
     mouse model and click it. With no name given, the first profile is used.
     """
-    rng = hm.rng
     profiles = browser.list_profiles()
     if not profiles:
         sys.exit("Profile picker is open but no profiles were found")
@@ -123,9 +132,9 @@ def choose_profile(hm, name, index):
     else:
         target = profiles[0]
         log("No --profile given - using the first one")
-    think(rng, 1.0)                              # a person scans the cards first
+    human.visual_search(len(profiles))           # a person scans the cards first
     log(f"Choosing profile [{target['index']}] {target['name']} ({target['account'] or '-'})")
-    hm.click_rect(target["click_rect"])
+    human.click_rect(target["click_rect"])
     if not browser.wait_for_browser_window(timeout=20):
         sys.exit("Browser window did not open after choosing the profile")
 
@@ -134,19 +143,21 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--process", default="search", choices=["search", "word"],
                     help="search = Chrome search demo, word = type a paragraph into a new Word document")
-    ap.add_argument("--wpm", type=float, default=80, help="word demo: typing-speed persona")
+    ap.add_argument("--wpm", type=float, default=None, help="typing speed (default: from the sampled persona)")
     ap.add_argument("--text", default=WORD_PARAGRAPH, help="word demo: text to type")
     ap.add_argument("--text-file", default=None, help="word demo: type the contents of this file instead")
     ap.add_argument("--revisions", default="heuristic", choices=["heuristic", "llm"],
                     help="word demo: where changed wordings come from")
-    ap.add_argument("--pause-scale", type=float, default=0.7,
-                    help="word demo: thinking-pause length (1.0 = timed-essay writers)")
+    ap.add_argument("--pause-scale", type=float, default=None,
+                    help="thinking-pause length while composing (persona default 0.7; 1.0 = timed-essay writers)")
     ap.add_argument("--query", default="wikipedia")
     ap.add_argument("--link-hint", default=None, help="text the first clicked result should contain (default: query)")
     ap.add_argument("--read-seconds", type=float, default=20)
     ap.add_argument("--no-model", action="store_true", help="use the fallback generator")
-    ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--temperature", type=float, default=None, help="mouse path variety (persona default 1.0)")
+    ap.add_argument("--shortcut-pref", type=float, default=None,
+                    help="0 = always reaches for the mouse, 1 = always keyboard shortcuts (default: sampled)")
+    ap.add_argument("--seed", type=int, default=None, help="reproduces the whole run, persona included")
     ap.add_argument("--profile", default=None,
                     help="profile to pick on the 'Who's using Chrome?' screen (profile or account name)")
     ap.add_argument("--profile-index", type=int, default=0,
@@ -160,103 +171,94 @@ def main(argv=None):
             print(describe_profiles(profiles).replace("; ", "\n") if profiles else "Profile picker is not open.")
             return
 
-        hm = HumanMouse(use_model=not args.no_model, temperature=args.temperature, seed=args.seed)
-        rng = hm.rng
-        log(f"Mouse backend: {hm.backend} | click timing: {hm.clicks.summary()}")
-        log("Starting in 3 s - don't touch the mouse/keyboard.")
-        time.sleep(3)
+        human = make_human(args)
 
         # 1. Open Chrome
         log("Opening Chrome")
-        if not browser.open_chrome():
+        if not browser.open_chrome(launch=lambda: human.open_app("chrome")):
             sys.exit("Chrome window did not appear")
         time.sleep(1.0)
         if browser.get_profile_picker(timeout=1):
-            choose_profile(hm, args.profile, args.profile_index)
+            choose_profile(human, args.profile, args.profile_index)
             time.sleep(1.0)
         browser.maximize_chrome()
         time.sleep(1.0)
+        human.think("scan")
 
-        # 2. Address bar
-        bar = browser.get_address_bar_rect()
-        if not bar:
-            sys.exit("Couldn't locate the address bar")
-        log("Moving to the address bar")
-        hm.click_rect(bar)
-        think(rng)
-
-        # Safety: never type unless Chrome's address bar really has keyboard focus
-        if not browser.address_bar_has_focus():
-            log("Address bar not focused after click - refocusing Chrome (Ctrl+L)")
+        # 2. Address bar: clicked or Ctrl+L, depending on the person
+        log("Focusing the address bar")
+        if not human.focus_address_bar():
+            # Safety: never type unless Chrome's address bar really has keyboard focus
+            log("Address bar not focused - refocusing Chrome (Ctrl+L)")
             browser.focus_chrome()
             time.sleep(0.5)
-            keyboard.hotkey("ctrl", "l")
+            human.hotkey("ctrl", "l")
             time.sleep(0.3)
             if not browser.address_bar_has_focus():
                 sys.exit("Chrome's address bar doesn't have keyboard focus - stopping before typing anything")
 
         # 3. Search
         log(f"Typing search: {args.query!r}")
-        keyboard.select_all()                      # replace whatever is in the bar
-        human_typing.type_like_human(args.query, rng=rng)
+        human.select_all_and_type(args.query)      # replace whatever is in the bar
         # Chrome's inline autocomplete can swallow a Backspace (it deletes the highlighted
         # suggestion instead of the typo). If the bar doesn't hold the query, retype it cleanly.
         typed = browser.get_current_url()
         if typed and not typed.startswith(args.query):
             log(f"Address bar shows {typed!r} - retyping the query")
-            think(rng, 0.6)
-            keyboard.select_all()
-            human_typing.type_like_human(args.query, rng=rng, error_scale=0.0)
-        think(rng, 0.4)
-        keyboard.press_key("enter")
+            human.think("confirm")
+            human.select_all_and_type(args.query, error_scale=0.0)
+        human.think("confirm")
+        human.press("enter")
         wait_for_navigation()
-        think(rng, 1.2)
+        human.think("scan")
 
         # 4. First result
         page = browser.get_page_rect()
         links = usable_links(page)
-        first = choose_link(links, rng, hint=args.link_hint or args.query)
+        first = choose_link(links, human, hint=args.link_hint or args.query)
         if not first:
             sys.exit("No clickable links found on the results page")
         log(f"Clicking result: {first['name'][:60]!r}")
-        hm.click_rect(first["rect"])
+        human.click_rect(first["rect"])
         wait_for_navigation()
 
         # 5. Read
         log(f"Reading for ~{args.read_seconds:.0f} s")
-        reading.read_page(hm, args.read_seconds, browser.get_page_rect())
-        think(rng)
+        reading.read_page(human.hm, args.read_seconds, browser.get_page_rect(), reading_params(human), log_trace)
+        human.think("mental")
 
-        # 6. Back
-        back = browser.get_toolbar_button_rect("Back")
-        if back:
-            log("Moving to Back button")
-            hm.click_rect(back)
-        else:
-            log("Back button not found - using Alt+Left")
-            browser.go_back()
+        # 6. Back: the toolbar button or Alt+Left, depending on the person
+        log("Going back")
+        human.go_back()
         wait_for_navigation()
-        think(rng, 1.0)
+        human.think("scan")
 
         # 7. A different result
         links = usable_links(browser.get_page_rect(), exclude={first["name"]})
-        second = choose_link(links, rng)
+        second = choose_link(links, human)
         if second:
             log(f"Clicking another result: {second['name'][:60]!r}")
-            hm.click_rect(second["rect"])
+            human.click_rect(second["rect"])
             wait_for_navigation()
-            reading.read_page(hm, args.read_seconds / 2, browser.get_page_rect())
+            reading.read_page(human.hm, args.read_seconds / 2, browser.get_page_rect(),
+                              reading_params(human), log_trace)
         else:
             log("No second link found")
 
         log("Demo finished.")
     else:
-        hm = HumanMouse(use_model=not args.no_model, temperature=args.temperature, seed=args.seed)
-        rng = hm.rng
-        log(f"Mouse backend: {hm.backend} | click timing: {hm.clicks.summary()}")
-        log("Starting in 3 s - don't touch the mouse/keyboard.")
-        time.sleep(3)
-        run_word_demo(hm, args)
+        run_word_demo(make_human(args), args)
+
+
+def make_human(args):
+    """The simulated person for this run (persona sampled from --seed, CLI overrides win)."""
+    human = Human(seed=args.seed, use_model=not args.no_model, wpm=args.wpm, pause_scale=args.pause_scale,
+                  mouse_temperature=args.temperature, shortcut_pref=args.shortcut_pref)
+    log(f"Persona: {human.persona.describe()}")
+    log(f"Mouse backend: {human.hm.backend} | click timing: {human.hm.clicks.summary()}")
+    log("Starting in 3 s - don't touch the mouse/keyboard.")
+    time.sleep(3)
+    return human
 
 
 # --- Word demo ---------------------------------------------------------------------------
@@ -346,13 +348,12 @@ def word_document_text(doc):
         return None
 
 
-def run_word_demo(hm, args):
+def run_word_demo(human, args):
     """
     Open Word, start a blank document, click into the page with the learned mouse
     model and type a paragraph with the learned typing model (typos and their
     corrections, thinking pauses, changes of wording, going back to fix things).
     """
-    rng = hm.rng
     text = args.text
     if args.text_file:
         with open(args.text_file, encoding="utf-8") as f:
@@ -361,7 +362,7 @@ def run_word_demo(hm, args):
     # 1. Word + blank document
     already_open = word_window_handles()       # never type into a document that was already open
     log("Opening Word")
-    office.open_word()
+    human.open_app("word")
     win = foreground_word_window(timeout=30, ignore=already_open)
     if win is None:
         sys.exit("A new Word window did not appear")
@@ -369,8 +370,8 @@ def run_word_demo(hm, args):
     tile = word_blank_document_tile(win)
     if tile is not None:                       # Start screen: click "Blank document"
         log("Clicking 'Blank document'")
-        think(rng, 0.8)                        # a person glances over the Start screen first
-        hm.click_rect(ui_elements.element_rect(tile))
+        human.think("scan")                    # a person glances over the Start screen first
+        human.click_element(tile)
         deadline = time.time() + 20
         while word_blank_document_tile(win, timeout=0) is not None:
             if time.time() > deadline:
@@ -391,10 +392,10 @@ def run_word_demo(hm, args):
     l, t, r, b = ui_elements.element_rect(doc)
     top_of_page = (l + (r - l) * 0.25, t + 40, l + (r - l) * 0.75, t + min(160, (b - t) * 0.25))
     log("Clicking into the document")
-    think(rng, 0.8)
-    hm.click_rect(top_of_page)
-    think(rng, 0.5)
-    keyboard.hotkey("ctrl", "end")             # caret at the end of the (empty) document
+    human.think("scan")
+    human.click_field(top_of_page)
+    human.think("glance")
+    human.hotkey("ctrl", "end")                # caret at the end of the (empty) document
     if not word_document_has_focus(doc):
         log("Document not focused after click - activating Word")
         win.SetActive()
@@ -404,10 +405,9 @@ def run_word_demo(hm, args):
 
     # 3. Type
     words = len(text.split())
-    log(f"Typing {words} words at a {args.wpm:.0f} wpm persona (revisions: {args.revisions})")
+    log(f"Typing {words} words at a {human.persona.wpm:.0f} wpm persona (revisions: {args.revisions})")
     t0 = time.monotonic()
-    plan = human_typing.type_like_human(text, rng=rng, wpm=args.wpm, mode="compose",
-                                        revisions=args.revisions, pause_scale=args.pause_scale, max_pause=4.0)
+    plan = human.type(text, mode="compose", revisions=args.revisions, max_pause=4.0)
     took = time.monotonic() - t0
     tags = {tag: sum(1 for k in plan if k.tag == tag) for tag in ("typo", "fix", "false_start", "lost", "nav")}
     log(f"Typed in {took:.0f} s = {len(text) / 5 / (took / 60):.0f} wpm effective "

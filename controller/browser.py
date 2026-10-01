@@ -50,16 +50,18 @@ def _foreground_chrome():
     return auto.ControlFromHandle(hwnd)
 
 
-def open_chrome(timeout=config.DEFAULT_TIMEOUT):
+def open_chrome(timeout=config.DEFAULT_TIMEOUT, launch=None):
     """
     Open Chrome from the Start menu and wait until a *new* Chrome window is in
     the foreground: either a browser window or the "Who's using Chrome?"
     profile picker (check with get_profile_picker()).
     Already-open Chrome windows don't count, so this works while Chrome runs.
+    launch: optional callable that opens Chrome instead (e.g. the behaviour
+            layer's human-timed Start-menu search).
     Returns the new window's UIA control, or None on timeout.
     """
     before = {w.NativeWindowHandle for w in _chrome_windows()}
-    apps.open_via_start_menu("chrome")
+    (launch or (lambda: apps.open_via_start_menu("chrome")))()
     deadline = time.time() + timeout
     while time.time() < deadline:
         fg = _foreground_chrome()
@@ -525,3 +527,22 @@ def scroll_until_link_visible(text, exact=False, step=-3, max_scrolls=15, pause=
         scroll_page(step)
         time.sleep(pause)
     return None
+
+
+# --- Page text ---------------------------------------------------------------
+
+def page_text_nodes(area=None, min_words=3):
+    """
+    Visible text elements of the current page: (pattern, nodes), where nodes =
+    [{'text', 'rect', 'control'}] top to bottom (only those inside `area` if given)
+    and pattern is the page's TextPattern (or None), for ui_elements.node_words().
+    Chrome must be in the foreground, as for find_links().
+    """
+    win = get_chrome_window()
+    if not win:
+        return None, []
+    _request_web_accessibility(win)
+    doc = _get_page_document(win)
+    if not doc:
+        return None, []
+    return ui_elements.text_pattern(doc), ui_elements.text_nodes(doc, area, min_words)

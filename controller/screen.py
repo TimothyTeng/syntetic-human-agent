@@ -172,3 +172,29 @@ def locate_text_ocr(text, region=None, case_sensitive=False):
             bottom = max(data["top"][k] + data["height"][k] for k in range(i, last + 1))
             return left + offset_x, top + offset_y, right - left, bottom - top
     return None
+
+
+def ocr_lines(rect=None, min_conf=50):
+    """
+    OPTIONAL fallback: words on screen grouped into text lines by OCR.
+
+    rect: (left, top, right, bottom) area to read; None = primary screen.
+    Returns [[{'text', 'rect'}, ...], ...] (rect = (left, top, right, bottom) in
+    screen pixels), top to bottom, or [] if OCR is not available.
+    """
+    if not ocr_available():
+        return []
+    region = (rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]) if rect else None
+    img = screenshot(region=region)
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    ox, oy = (rect[0], rect[1]) if rect else (0, 0)
+    lines = {}
+    for i, text in enumerate(data["text"]):
+        if not text.strip() or float(data["conf"][i]) < min_conf:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        l, t = data["left"][i] + ox, data["top"][i] + oy
+        lines.setdefault(key, []).append({"text": text.strip(),
+                                          "rect": (l, t, l + data["width"][i], t + data["height"][i])})
+    ordered = sorted(lines.values(), key=lambda ws: min(w["rect"][1] for w in ws))
+    return [sorted(ws, key=lambda w: w["rect"][0]) for ws in ordered]

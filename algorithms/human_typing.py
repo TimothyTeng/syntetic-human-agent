@@ -143,6 +143,25 @@ def _wait_until(target):
             time.sleep(rem - 0.002)
 
 
+def _run_events(events):
+    """Execute [(t, action, key)] (t = seconds from now, action 'down'/'up') with accurate
+    waits; any key still held at the end (or on an exception) is released."""
+    held = set()
+    t0 = time.perf_counter()
+    try:
+        for t, action, key in sorted(events, key=lambda e: e[0]):
+            _wait_until(t0 + t)
+            if action == "down":
+                keyboard.key_down(key)
+                held.add(key)
+            else:
+                keyboard.key_up(key)
+                held.discard(key)
+    finally:
+        for key in list(held):
+            keyboard.key_up(key)
+
+
 def play(plan, rng=None):
     """Execute a keystroke plan on the focused window."""
     rng = rng or np.random.default_rng()
@@ -163,3 +182,73 @@ def play(plan, rng=None):
     finally:
         for key in list(held):             # never leave a key (esp. Shift) stuck down
             keyboard.key_up(key)
+
+
+# --- Single keys and shortcuts ----------------------------------------------------------
+# The "glue" keys between typed text (Enter, F5, Ctrl+L, Alt+Left...) get the same learned
+# hold times and modifier timing as typing, instead of being pressed in zero time.
+
+# pyautogui key name -> character the timing model knows; other keys use OTHER_KEY
+_TIMING_CHARS = {"enter": "\n", "return": "\n", "tab": "\t", "space": " ",
+                 "backspace": K.BKSP, "left": K.LEFT, "right": K.RIGHT}
+OTHER_KEY = "\x00"     # maps to the model's "<other>" key class
+
+
+def _timing_key(name):
+    if name in _TIMING_CHARS:
+        return _TIMING_CHARS[name]
+    return name if len(name) == 1 else OTHER_KEY
+
+
+def key_timer(wpm=45, rng=None, sigma=0.35):
+    """
+    A motor-timing session for single keys / shortcuts. Keep one per persona (as
+    behaviour.Human does) so hold times stay consistent for the same "person".
+    """
+    return get_model().timer.session(wpm, rng or np.random.default_rng(), temperature=sigma / 0.35)
+
+
+def press_like_human(key, rng=None, presses=1, timer=None, wpm=45):
+    """
+    Press a key (pyautogui name: 'enter', 'f5', 'down', 'a', ...) with a learned hold
+    time. presses > 1 repeats it with learned key-to-key intervals (e.g. 3x 'down').
+    """
+    rng = rng or np.random.default_rng()
+    timer = timer or key_timer(wpm, rng)
+    tk = _timing_key(key)
+    events, t, prev = [], 0.0, None
+    for i in range(presses):
+        iki, hold = timer.sample(prev, tk)
+        if i:
+            t = max(t + iki, events[-1][0] + 0.01)      # the previous press must be released first
+        events += [(t, "down", key), (t + hold, "up", key)]
+        prev = tk
+    _run_events(events)
+
+
+def hotkey_like_human(*keys, rng=None, timer=None, wpm=45):
+    """
+    Press a shortcut like a person: modifiers go down one after another, the main key
+    follows after a learned Shift-style lead time and is held for a learned hold time,
+    then the modifiers come up after a learned lag - which is sometimes negative, i.e.
+    the modifier is let go while the main key is still down, as real typists do.
+
+    Example: hotkey_like_human('ctrl', 'l', rng=rng)
+    """
+    rng = rng or np.random.default_rng()
+    timer = timer or key_timer(wpm, rng)
+    model_timer = get_model().timer
+    *mods, main = keys
+    events, t = [], 0.0
+    for i, m in enumerate(mods):
+        if i:   # a second modifier follows the first quickly
+            t += float(np.clip(0.05 * np.exp(rng.normal(0, 0.5)), 0.015, 0.25))
+        events.append((t, "down", m))
+    lead, _ = model_timer.sample_shift(rng) if mods else (0.0, 0.0)
+    t_main = t + float(np.clip(lead, 0.03, 0.6))
+    _, hold = timer.sample(None, _timing_key(main))
+    events += [(t_main, "down", main), (t_main + hold, "up", main)]
+    for i, m in enumerate(reversed(mods)):
+        _, lag = model_timer.sample_shift(rng)
+        events.append((max(t_main + 0.015, t_main + hold + lag + 0.02 * i), "up", m))
+    _run_events(events)

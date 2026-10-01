@@ -149,3 +149,107 @@ def list_elements(window, control_type=None, max_depth=40, visible_only=True):
 def list_buttons(window):
     """DEBUG helper: print every visible button in a window."""
     return list_elements(window, "ButtonControl")
+
+
+# --- Text and word positions -------------------------------------------------
+# Used to find where words are on screen, e.g. so the behaviour layer can follow a
+# line of text with the cursor while "reading".
+
+SINGLE_LINE_MAX_PX = 40   # a text element no taller than this is treated as one line
+
+
+def text_pattern(ctrl):
+    """The element's UIA TextPattern (documents, rich text), or None."""
+    try:
+        return ctrl.GetTextPattern()
+    except Exception:
+        return None
+
+
+def text_nodes(root, area=None, min_words=3, max_depth=40):
+    """
+    Visible text elements (TextControl) under `root` with at least `min_words` words,
+    top to bottom: [{'text', 'rect', 'control'}]. With `area`, only elements lying
+    entirely inside that rect are returned.
+    """
+    nodes = []
+    for ctrl in find_elements(root, "TextControl", max_depth=max_depth):
+        text = (ctrl.Name or "").strip()
+        if len(text.split()) < min_words:
+            continue
+        rect = element_rect(ctrl)
+        if area and not (area[0] <= rect[0] and rect[2] <= area[2] and area[1] <= rect[1] and rect[3] <= area[3]):
+            continue
+        nodes.append({"text": text, "rect": rect, "control": ctrl})
+    return sorted(nodes, key=lambda n: (n["rect"][1], n["rect"][0]))
+
+
+def node_words(node, pattern=None, max_words=60):
+    """
+    Words of a text element with their screen rects: [{'text', 'rect'}] in reading order.
+
+    pattern: TextPattern of the enclosing document (e.g. the Chrome page). Words are then
+             read from the element's own text range, one Word unit at a time, which
+             handles wrapped multi-line paragraphs exactly.
+    Without a pattern (or if that fails) a single-line element is split proportionally
+    by character count; multi-line elements then return [].
+    """
+    words = _pattern_words(pattern, node, max_words) if pattern is not None else []
+    if words:
+        return words
+    if node["rect"][3] - node["rect"][1] <= SINGLE_LINE_MAX_PX:
+        return split_line_proportional(node["text"], node["rect"])[:max_words]
+    return []
+
+
+def _pattern_words(pattern, node, max_words):
+    try:
+        # uiautomation's TextPattern.RangeFromChild passes the wrong object; call the COM method directly
+        whole = auto.TextRange(pattern.pattern.RangeFromChild(node["control"].Element))
+        word = whole.Clone()
+        word.ExpandToEnclosingUnit(auto.TextUnit.Word, waitTime=0)
+        l, t, r, b = node["rect"]
+        out = []
+        while len(out) < max_words:
+            if word.CompareEndpoints(auto.TextPatternRangeEndpoint.Start, whole, auto.TextPatternRangeEndpoint.End) >= 0:
+                break
+            text = word.GetText(100).strip()
+            rects = word.GetBoundingRectangles()
+            if text and rects:
+                wr = rects[0]
+                if not (l - 5 <= wr.xcenter() <= r + 5 and t - 5 <= wr.ycenter() <= b + 5):
+                    break                             # ran past the element
+                out.append({"text": text, "rect": (wr.left, wr.top, wr.right, wr.bottom)})
+            if word.Move(auto.TextUnit.Word, 1, waitTime=0) == 0:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def split_line_proportional(text, rect):
+    """Approximate word rects on one line of text: x positions in proportion to characters."""
+    left, top, right, bottom = rect
+    words = text.split()
+    if not words:
+        return []
+    per_char = (right - left) / max(len(" ".join(words)), 1)
+    out, pos = [], 0
+    for w in words:
+        x0 = left + pos * per_char
+        out.append({"text": w, "rect": (int(x0), top, int(x0 + len(w) * per_char), bottom)})
+        pos += len(w) + 1
+    return out
+
+
+def group_lines(words):
+    """Group word dicts into visual lines (top to bottom, each left to right)."""
+    lines = []
+    for w in sorted(words, key=lambda w: ((w["rect"][1] + w["rect"][3]) / 2, w["rect"][0])):
+        cy = (w["rect"][1] + w["rect"][3]) / 2
+        h = w["rect"][3] - w["rect"][1]
+        if lines and abs(cy - lines[-1]["cy"]) < 0.5 * max(h, 1):
+            lines[-1]["words"].append(w)
+        else:
+            lines.append({"cy": cy, "words": [w]})
+    return [sorted(line["words"], key=lambda w: w["rect"][0]) for line in lines]
