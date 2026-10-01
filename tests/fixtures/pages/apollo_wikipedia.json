@@ -1,0 +1,132 @@
+{
+ "url": "https://en.wikipedia.org/wiki/Apollo_program",
+ "title": "Apollo program - Wikipedia",
+ "site": "Wikipedia",
+ "accessed": "2026-10-01",
+ "main_text": "Apollo program\nFrom Wikipedia, the free encyclopedia\nThis article is about the American crewed lunar program. For other uses, see Apollo (disambiguation).\nThe Apollo program, also known as Project Apollo, was the third United States human spaceflight program carried out by the National Aeronautics and Space Administration (NASA), which succeeded in landing the first humans on the Moon from 1969 to 1972.[1] It was first conceived during the presidency of Dwight D. Eisenhower as a three-person spacecraft to follow the one-person Project Mercury.[2]\nApollo was later dedicated to President John F. Kennedy's national goal for the 1960s of \"landing a man on the Moon and returning him safely to the Earth\" in an address to Congress on May 25, 1961.[3] It was the third American human spaceflight program to fly, preceded by the two-person Project Gemini conceived in 1961 to extend spaceflight capability in support of Apollo.[4]\nKennedy's goal was accomplished on the Apollo 11 mission when astronauts Neil Armstrong and Buzz Aldrin landed their Apollo Lunar Module (LM) on July 20, 1969, and walked on the lunar surface, while Michael Collins remained in lunar orbit in the command and service module (CSM).[5] Five subsequent Apollo missions also landed astronauts on the Moon, the last, Apollo 17, in December 1972.[6]\nContents\n1 Background\n2 Choosing a mission mode\n3 Spacecraft\n4 Missions\n5 Legacy\n6 See also\n7 References\nBackground[edit]\nMain article: Space Race\nThe Apollo program was conceived during the Eisenhower administration in early 1960, as a follow-up to Project Mercury.[7] While the Mercury capsule could support only one astronaut on a limited Earth orbital mission, Apollo would carry three.[8] Possible missions included ferrying crews to a space station, circumlunar flights, and eventual crewed lunar landings.[9]\nIn November 1960, John F. Kennedy was elected president after a campaign that promised American superiority over the Soviet Union in the fields of space exploration and missile defense.[10] The Soviet Union launched the first human, Yuri Gagarin, into orbit on April 12, 1961, which intensified American fears of falling behind.[11]\nIn 1961, President John F. Kennedy challenged the nation to land an astronaut on the Moon by the end of the decade.[12] The announcement transformed Apollo from a modest research effort into one of the largest engineering projects ever undertaken in peacetime.[13] NASA expanded rapidly, and at its peak the program employed roughly 400,000 people across industry, universities and government.[14]\nChoosing a mission mode[edit]\nOnce Kennedy had defined a goal, the Apollo mission planners were faced with the challenge of designing a spacecraft that could meet it while minimizing risk to human life, cost, and demands on technology and astronaut skill.[15] Four possible mission modes were considered, including direct ascent, Earth orbit rendezvous and lunar surface rendezvous.[16]\nIn 1962, NASA selected lunar orbit rendezvous, a plan championed by engineer John Houbolt (/ˈhuːboʊlt/) that used a separate lander to descend to the surface.[17] This approach required only one launch of a large rocket and allowed the lander to be built light enough to reach the Moon.[18] Critics initially considered the method too risky because a failed rendezvous in lunar orbit would leave the crew stranded far from Earth.[19]\nSpacecraft[edit]\nThe Apollo spacecraft consisted of a command module, a service module and a lunar module, launched together on top of a Saturn V rocket.[20] The command module was the only part of the spacecraft that returned to Earth, protected by a heat shield during reentry.[21]\nThe lunar module was a two-stage vehicle designed by Grumman to land two astronauts on the surface and return them to lunar orbit.[22] The Saturn V rocket, developed under the direction of Wernher von Braun at the Marshall Space Flight Center, remains one of the most powerful rockets ever flown.[23]\nOn January 27, 1967, a cabin fire during a launch rehearsal test killed astronauts Gus Grissom, Ed White and Roger Chaffee.[24] The accident led to a lengthy investigation and to major changes in the design of the command module before crewed flights resumed.[25]\nMissions[edit]\nFurther information: List of Apollo missions\nThe first crewed flight, Apollo 7, tested the command and service module in Earth orbit in October 1968.[26] Apollo 8 became the first crewed spacecraft to orbit the Moon in December 1968, and its crew photographed the famous Earthrise image.[27]\nIn July 1969, Apollo 11 achieved the first crewed landing in the Sea of Tranquility.[28] Apollo 13 suffered an oxygen tank explosion in April 1970, forcing the crew to abandon the landing and return safely to Earth using the lunar module as a lifeboat.[29]\nThe final three missions used the Lunar Roving Vehicle, which allowed astronauts to travel several kilometres from the landing site.[30] In total, twelve astronauts walked on the Moon between 1969 and 1972, and the missions returned 382 kilograms of lunar rock and soil.[31]\nLegacy[edit]\nThe Apollo program stimulated advances in many areas of technology incidental to rocketry and human spaceflight, including avionics, telecommunications and computers.[32] The Apollo Guidance Computer was one of the first computers to use integrated circuits, which helped to drive early demand for the technology.[33]\nThe program cost about 25.8 billion dollars, a figure that equals well over 200 billion dollars in present-day terms.[34] Images of Earth taken by Apollo crews, such as Earthrise and The Blue Marble, are widely credited with inspiring the environmental movement.[35]\nLunar samples returned by the missions continue to be studied by scientists around the world, and they reshaped theories about the origin of the Moon.[36] Hardware and experience from the program were later used in the Skylab space station and the Apollo-Soyuz Test Project.[37]\nSee also[edit]\nList of Apollo astronauts and the many people who supported the missions from the ground\nReferences[edit]\nBenson, Charles D. and William Barnaby Faherty. Moonport: A History of Apollo Launch Facilities and Operations. NASA. Retrieved 12 June 2013. ISBN 978-0-16-048226-0.\nBrooks, Courtney G. and others. Chariots for Apollo: A History of Manned Lunar Spacecraft. Archived from the original on 9 February 2008.\n",
+ "headings": [
+  {
+   "text": "Apollo program",
+   "level": 1
+  },
+  {
+   "text": "Contents",
+   "level": 2
+  },
+  {
+   "text": "Background",
+   "level": 2
+  },
+  {
+   "text": "Choosing a mission mode",
+   "level": 2
+  },
+  {
+   "text": "Spacecraft",
+   "level": 2
+  },
+  {
+   "text": "Missions",
+   "level": 2
+  },
+  {
+   "text": "Legacy",
+   "level": 2
+  },
+  {
+   "text": "See also",
+   "level": 2
+  },
+  {
+   "text": "References",
+   "level": 2
+  }
+ ],
+ "tables": [
+  {
+   "kind": "infobox",
+   "rows": [
+    [
+     "Apollo program",
+     "Apollo program"
+    ],
+    [
+     "Country",
+     "United States"
+    ],
+    [
+     "Organization",
+     "NASA"
+    ],
+    [
+     "Purpose",
+     "Crewed lunar landing"
+    ],
+    [
+     "Status",
+     "Completed"
+    ],
+    [
+     "Program history",
+     "Program history"
+    ],
+    [
+     "Cost",
+     "$25.8 billion (1973)"
+    ],
+    [
+     "Duration",
+     "1961–1972"
+    ],
+    [
+     "First flight",
+     "February 26, 1966[1]"
+    ],
+    [
+     "First crewed flight",
+     "October 11, 1968"
+    ],
+    [
+     "Last flight",
+     "December 7, 1972"
+    ],
+    [
+     "Launch site(s)",
+     "Kennedy Space Center"
+    ],
+    [
+     "Vehicle information",
+     "Vehicle information"
+    ],
+    [
+     "Crew vehicle",
+     "Apollo command and service module"
+    ],
+    [
+     "Launch vehicle(s)",
+     "Saturn IB and Saturn V"
+    ]
+   ]
+  }
+ ],
+ "seen_intervals": [
+  [
+   0,
+   22
+  ],
+  [
+   18,
+   41
+  ],
+  [
+   35,
+   63
+  ],
+  [
+   58,
+   80
+  ]
+ ],
+ "method": "main-landmark",
+ "total_words": 991
+}

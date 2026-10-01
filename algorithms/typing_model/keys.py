@@ -94,7 +94,7 @@ def word_delete_start(buf, cur):
     """
     Where Ctrl+Backspace at caret `cur` deletes back to: one space right before the
     caret (if any), then the letters/digits of the word before it - the behaviour of
-    Word, Notepad and browser text fields for plain words. Plans only use it where
+    Writer, Word, Notepad and browser text fields for plain words. Plans only use it where
     that is exact (runs of whole words separated by single spaces).
     """
     i = cur

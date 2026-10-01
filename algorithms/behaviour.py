@@ -2,7 +2,7 @@
 Behaviour layer: one consistent simulated person.
 
     human = Human(seed=42)                 # samples a Persona, loads the mouse model
-    human.open_app("word")
+    human.open_app("openoffice writer")
     human.click_field(rect); human.type("Quarterly summary")
     human.go_back()
 
@@ -48,13 +48,13 @@ def _lognormal(rng, median, sigma):
 
 @dataclass
 class Persona:
-    wpm: float = 55.0               # typing speed (words per minute)
+    wpm: float = 85.0               # typing speed (words per minute)
     mouse_speed: float = 1.0        # playback speed of mouse movements (1 = recorded human speed)
     mouse_temperature: float = 1.0  # variety of mouse paths
     shortcut_pref: float = 0.5      # 0 = reaches for the mouse, 1 = keyboard shortcuts
     think_scale: float = 1.0        # multiplies every thinking pause
     error_scale: float = 1.0        # multiplies the typo rate
-    pause_scale: float = 0.7        # composition pauses (1.0 = timed-essay writers)
+    pause_scale: float = 0.5        # composition pauses (1.0 = timed-essay writers)
     reading_wpm: float = 230.0      # reading speed
     click_spread: float = 0.17      # click scatter around an element's centre (fraction of its size)
     new_tab_pref: float = 0.3       # how often links are opened in a new tab (Ctrl+click)
@@ -66,7 +66,7 @@ class Persona:
     def sample(cls, rng, **overrides):
         """A random but plausible office worker. Keyword overrides (non-None) win."""
         p = cls(
-            wpm=float(np.clip(rng.normal(55, 12), 30, 95)),
+            wpm=float(np.clip(rng.normal(85, 12), 30, 95)),
             mouse_speed=float(np.clip(np.exp(rng.normal(0, 0.12)), 0.75, 1.35)),
             shortcut_pref=float(rng.beta(2.0, 2.0)),
             think_scale=float(np.clip(np.exp(rng.normal(0, 0.25)), 0.6, 1.7)),
@@ -154,8 +154,9 @@ class Fatigue:
 HICK_A, HICK_B = 0.3, 0.25   # visual search: a + b*log2(N+1) seconds
 
 # Shortest Start-search prefix that reliably ranks the app first (conservative: shorter
-# ones like "wor" can match WordPad or settings pages on some machines)
-SAFE_PREFIX = {"chrome": "chrom", "word": "word", "excel": "exce", "notepad": "notep"}
+# ones like "wor" can match WordPad or settings pages on some machines; "openoffice"
+# alone ranks the OpenOffice Start Center first)
+SAFE_PREFIX = {"chrome": "chrom", "openoffice writer": "openoffice w", "excel": "exce", "notepad": "notep"}
 
 
 class Human:

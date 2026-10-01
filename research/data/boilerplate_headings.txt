@@ -1,0 +1,30 @@
+# Page sections that are never used as research material (matched case-insensitively,
+# ignoring a trailing "[edit]").
+contents
+see also
+references
+notes
+note
+notes and references
+citations
+sources
+bibliography
+further reading
+external links
+footnotes
+works cited
+gallery
+explanatory notes
+general and cited sources
+cited sources
+general sources
+related articles
+related content
+related topics
+more from britannica
+read more
+you may also like
+related
+share this
+media
+navigation menu

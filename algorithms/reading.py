@@ -113,7 +113,7 @@ def key_scroll(human, rng, params=ReadingParams(), direction=-1):
         human.press("down" if direction < 0 else "up", presses=int(rng.integers(2, 7)))
 
 
-def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=None, human=None):
+def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=None, human=None, on_view=None):
     """
     Simulate reading the current page for about `duration` seconds. Returns early if
     the reader reaches the bottom of the page and is done with it.
@@ -125,6 +125,8 @@ def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=Non
     on_trace:  optional callback(list of traced word dicts), e.g. for logging.
     human:     optional behaviour.Human - enables keyboard scrolling
                (params.p_key_scroll) and hand-switch (homing) time between devices.
+    on_view:   optional callback((scroll position %, visible %)) - at the start and after
+               every scroll, for pages that report their scroll position (what was seen).
     """
     rng = hm.rng
     area = reading_area(page_rect) if page_rect else None
@@ -139,6 +141,10 @@ def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=Non
     probs = probs / probs.sum()
     at_bottom = False
     last_view = None                                  # for pages that don't report a scroll position
+    if on_view:
+        state = browser.page_scroll_state()
+        if state is not None:
+            on_view(state)
     while time.monotonic() < end:
         action = rng.choice(actions, p=probs)
         if action == "scroll":
@@ -153,6 +159,8 @@ def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=Non
             state = browser.page_scroll_state()
             if state is not None:
                 at_bottom = state[0] >= params.end_percent
+                if on_view:
+                    on_view(state)
             elif direction < 0:                       # bottom = scrolling down moved nothing
                 view = browser.page_view_signature()
                 at_bottom = view is not None and view == last_view
@@ -200,7 +208,10 @@ def visible_text_lines(area, rng, max_nodes=4, min_words=3):
     the upper-middle of the view, where a reader is after scrolling) and split into
     words. OCR is the fallback for pages that expose no text. [] if neither works.
     """
-    pattern, nodes = browser.page_text_nodes(area, min_words)
+    try:
+        pattern, nodes = browser.page_text_nodes(area, min_words)
+    except Exception:                                 # the page changed under us (stale UIA elements)
+        pattern, nodes = None, []
     lines = []
     if nodes:
         w = np.array([_position_weight(n["rect"], area) * min(len(n["text"].split()), 30) for n in nodes])

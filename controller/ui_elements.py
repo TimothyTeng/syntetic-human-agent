@@ -14,7 +14,7 @@ Common control_type strings:
   'TabItemControl', 'ListItemControl', 'TextControl', 'DocumentControl',
   'CheckBoxControl', 'ComboBoxControl', 'WindowControl', 'PaneControl'
 
-Tip: run list_elements(get_window('Word')) to print what's available.
+Tip: run list_elements(get_window('OpenOffice Writer')) to print what's available.
 """
 
 import time
@@ -36,7 +36,7 @@ def get_window(title_substring, timeout=config.DEFAULT_TIMEOUT):
     Find a top-level window whose title contains `title_substring`.
 
     Returns a uiautomation WindowControl, or None if not found in `timeout` s.
-    Example: get_window('Google Chrome'), get_window('Word')
+    Example: get_window('Google Chrome'), get_window('OpenOffice Writer')
     """
     win = auto.WindowControl(searchDepth=1, SubName=title_substring)
     if win.Exists(maxSearchSeconds=timeout, searchIntervalSeconds=config.POLL_INTERVAL):
@@ -253,3 +253,66 @@ def group_lines(words):
         else:
             lines.append({"cy": cy, "words": [w]})
     return [sorted(line["words"], key=lambda w: w["rect"][0]) for line in lines]
+
+
+# --- Bulk queries and text ranges --------------------------------------------
+# Walking a long web page element by element costs one cross-process call per element
+# and property (tens of seconds on a long article). These ask UIA for every match in
+# one call instead.
+
+TREE_SCOPE_DESCENDANTS = 4
+
+
+def _uia():
+    """The raw IUIAutomation COM object behind uiautomation (it has no wrapper for FindAll
+    with conditions)."""
+    return auto.uiautomation._AutomationClient.instance().IUIAutomation
+
+
+def find_all_fast(root, control_type=None, properties=None, exclude=None):
+    """
+    All descendants of `root` (in document order) whose control type is `control_type`
+    ('TextControl' or a ControlType id) and whose properties equal `properties`
+    ({PropertyId: value}); `exclude` ({PropertyId: value}) drops elements having one of
+    those values. One IUIAutomationElement::FindAll call. Returns [] on any failure.
+    """
+    try:
+        uia = _uia()
+        conds = []
+        if control_type is not None:
+            conds.append(uia.CreatePropertyCondition(auto.PropertyId.ControlTypeProperty,
+                                                     _control_type_id(control_type)))
+        for pid, value in (properties or {}).items():
+            conds.append(uia.CreatePropertyCondition(pid, value))
+        for pid, value in (exclude or {}).items():
+            conds.append(uia.CreateNotCondition(uia.CreatePropertyCondition(pid, value)))
+        cond = conds[0] if conds else uia.CreateTrueCondition()
+        for extra in conds[1:]:
+            cond = uia.CreateAndCondition(cond, extra)
+        found = root.Element.FindAll(TREE_SCOPE_DESCENDANTS, cond)
+        out = []
+        for i in range(found.Length if found else 0):
+            ctrl = auto.Control.CreateControlFromElement(found.GetElement(i))
+            if ctrl is not None:
+                out.append(ctrl)
+        return out
+    except Exception:
+        return []
+
+
+def property_value(ctrl, property_id, default=None):
+    """A UIA property by id (also ones uiautomation has no wrapper for, e.g. 30173 HeadingLevel)."""
+    try:
+        return ctrl.Element.GetCurrentPropertyValue(property_id)
+    except Exception:
+        return default
+
+
+def range_text(pattern, ctrl, max_chars=100_000):
+    """Text of `ctrl` read through the enclosing document's TextPattern ('' on failure).
+    Unlike ctrl.Name this includes text inside links and nested elements."""
+    try:
+        # uiautomation's TextPattern.RangeFromChild passes the wrong object; call the COM method directly
+        return auto.TextRange(pattern.pattern.RangeFromChild(ctrl.Element)).GetText(max_chars) or ""
+    except Exception:
+        return ""

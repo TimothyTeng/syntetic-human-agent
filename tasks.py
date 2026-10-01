@@ -3,7 +3,8 @@ Desktop tasks performed by a simulated person (algorithms.behaviour.Human).
 
     Chrome   open_browser(), search_and_read() (results in place or in new tabs,
              occasional slips: wrong result, tab closed too early)
-    Word     open_word_document(), click_into_document(), type_into_document()
+    Writer   open_writer_document(), click_into_document(), type_into_document()
+             (OpenOffice Writer)
     Excel    open_office_blank(..., "Blank workbook"), focus_sheet(), goto_cell(), type_rows()
     Notepad  open_notepad_note() - always on an empty page, never in an existing note
     Session  Workspace + session_activities(): the same tasks as repeatable
@@ -17,6 +18,7 @@ the target field is confirmed to have keyboard focus.
 """
 
 import ctypes
+import os
 import re
 import time
 
@@ -26,6 +28,7 @@ from algorithms import reading
 from algorithms.mouse_model import scroll_stats
 from algorithms.session import Activity, TaskError
 from controller import apps, browser, office, ui_elements
+from controller import writer as W
 
 T0 = time.monotonic()
 
@@ -119,9 +122,11 @@ def reading_params(human):
                                  scroll=scroll_stats.load_default().for_profile(human.persona.scroll_profile))
 
 
-def read(human, seconds):
-    """Read the current page for about `seconds` (it may end early at the bottom of the page)."""
-    reading.read_page(human.hm, seconds, browser.get_page_rect(), reading_params(human), log_trace, human=human)
+def read(human, seconds, on_view=None):
+    """Read the current page for about `seconds` (it may end early at the bottom of the page).
+    on_view: see reading.read_page (research notes record which part of the page was seen)."""
+    reading.read_page(human.hm, seconds, browser.get_page_rect(), reading_params(human), log_trace, human=human,
+                      on_view=on_view)
 
 
 def page_reading_time(human, max_seconds, default=30.0):
@@ -269,8 +274,12 @@ def open_result(human, link):
         return False
     before = len(browser.tab_items())
     human.click_element(link["control"], modifiers=("ctrl",))
-    time.sleep(0.6)
-    tabs = browser.tab_items()
+    deadline = time.time() + 2.5                      # Chrome can take a moment to add the tab
+    while True:
+        time.sleep(0.4)
+        tabs = browser.tab_items()
+        if len(tabs) > before or time.time() >= deadline:
+            break
     if len(tabs) <= before:                           # no new tab appeared: it opened in place
         wait_for_navigation()
         return False
@@ -312,13 +321,17 @@ def leave_result(human, new_tab):
     wait_for_navigation()
 
 
-def read_result(human, seconds, new_tab):
+def read_result(human, seconds, new_tab, on_page=None, on_view=None):
     """Read the opened result. In a new tab, the person occasionally closes it too early,
-    realises, and reopens it with Ctrl+Shift+T."""
+    realises, and reopens it with Ctrl+Shift+T.
+    on_page: called once the page is open, before reading (research: take notes from it);
+    on_view: passed to read()."""
+    if on_page:
+        on_page()
     log(f"Reading for ~{seconds:.0f} s")
     if new_tab and human.rng.random() < P_EARLY_CLOSE * human.error_level:
         early = float(human.rng.uniform(2, min(8, seconds)))
-        read(human, early)
+        read(human, early, on_view)
         if close_tab(human):
             log("Slip: closed the tab too early - reopening it with Ctrl+Shift+T")
             human.think("confirm", 2.5)               # "wait, I wasn't done"
@@ -326,7 +339,7 @@ def read_result(human, seconds, new_tab):
             wait_for_navigation()
             human.think("glance")
         seconds = max(3.0, seconds - early)
-    read(human, seconds)
+    read(human, seconds, on_view)
 
 
 def maybe_click_wrong_result(human, links, intended):
@@ -358,10 +371,11 @@ def find_again(name, page_rect=None):
     return next((k for k in usable_links(page_rect) if k["name"] == name), None)
 
 
-def visit_result(human, links, link, read_seconds=None, max_read=90.0):
+def visit_result(human, links, link, read_seconds=None, max_read=90.0, on_page=None, on_view=None):
     """
     Open `link` (sometimes after clicking its neighbour by mistake) and read it.
     read_seconds: None = from the page's length, at most max_read.
+    on_page / on_view: see read_result().
     Returns (link actually read, whether it is in a new tab).
     """
     if maybe_click_wrong_result(human, links, link):
@@ -370,12 +384,14 @@ def visit_result(human, links, link, read_seconds=None, max_read=90.0):
             raise TaskError("The intended result is no longer on the results page")
     log(f"Clicking result: {link['name'][:60]!r}")
     new_tab = open_result(human, link)
-    read_result(human, read_seconds or page_reading_time(human, max_read), new_tab)
+    if on_page:                       # first (it waits for a slow page), then size the reading time
+        on_page()
+    read_result(human, read_seconds or page_reading_time(human, max_read), new_tab, on_view=on_view)
     return link, new_tab
 
 
 def search_and_read(human, query, read_seconds=None, link_hint=None, second_result=True, max_read=90.0,
-                    allow_suggestion=False):
+                    allow_suggestion=False, on_page=None, on_view=None):
     """
     Search, open a result, read it, return to the results and (optionally) read a second
     result. Results open in place or in a new tab (persona habit); slips happen now and then.
@@ -383,6 +399,7 @@ def search_and_read(human, query, read_seconds=None, link_hint=None, second_resu
                   max_read). The second result gets about half as long.
     link_hint: text the first clicked result should contain (None = any top result).
     allow_suggestion: see search().
+    on_page / on_view: see read_result() - called for every result read.
     """
     search(human, query, allow_suggestion and not link_hint)
 
@@ -390,7 +407,7 @@ def search_and_read(human, query, read_seconds=None, link_hint=None, second_resu
     first = choose_link(links, human, hint=link_hint)
     if not first:
         raise TaskError("No search result on an allowed site (see ALLOWED_DOMAINS) - not clicking anything")
-    first, new_tab = visit_result(human, links, first, read_seconds, max_read)
+    first, new_tab = visit_result(human, links, first, read_seconds, max_read, on_page, on_view)
     if not second_result:
         if new_tab:                                   # don't leave tabs piling up
             leave_result(human, new_tab)
@@ -404,14 +421,15 @@ def search_and_read(human, query, read_seconds=None, link_hint=None, second_resu
     if not second:
         log("No other result on an allowed site - not opening a second one")
         return
-    _, new_tab = visit_result(human, links, second, read_seconds and read_seconds / 2, max_read / 2)
+    _, new_tab = visit_result(human, links, second, read_seconds and read_seconds / 2, max_read / 2, on_page,
+                              on_view)
     if new_tab:
         leave_result(human, new_tab)
 
 
-# --- Word ----------------------------------------------------------------------------------
+# --- Writer --------------------------------------------------------------------------------
 
-WORD_PARAGRAPH = (
+WRITER_PARAGRAPH = (
     "Over the past quarter, our team has focused on improving the reliability of the scheduling "
     "system and reducing the time it takes to onboard new customers. Most of the delays we saw "
     "earlier in the year came from manual data checks, so we introduced a simple validation step "
@@ -424,10 +442,7 @@ WORD_PARAGRAPH = (
     "two or three of our largest customers to understand what they would like to see improved."
 )
 
-# Word's AutoCorrect turns straight quotes into curly ones; compare text without them
-_QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
-
-WORD_WINDOW_CLASS = "OpusApp"
+WRITER_APP = "openoffice writer"           # its Start-menu name
 EXCEL_WINDOW_CLASS = "XLMAIN"
 NOTEPAD_WINDOW_CLASS = "Notepad"
 
@@ -503,86 +518,105 @@ def open_office_blank(human, app, window_class, tile_name):
     return win
 
 
-# Word ------------------------------------------------------------------------------
+# Writer ------------------------------------------------------------------------------
 
-def word_window_handles():
-    """Handles of every open Word window (any state: minimised, Start screen, document)."""
-    return app_window_handles(WORD_WINDOW_CLASS)
-
-
-def foreground_word_window(timeout=30, ignore=()):
+def foreground_writer_window(timeout=30, ignore=()):
     """
-    The Word window that is in front, as a UIA control (None on timeout).
-    Window titles can't tell Word's states apart: with another document open, the
-    Start screen of a new window is already titled "Document2 - Word".
+    The OpenOffice Writer window that is in front, as a UIA control (None on timeout).
+    ignore: handles to skip - pass the windows that were already open so only a newly
+            opened one is accepted. (All OpenOffice windows share one window class, so the
+            title tells Writer from Calc or the Start Center.)
     """
-    return foreground_app_window(WORD_WINDOW_CLASS, timeout, ignore)
+    deadline = time.time() + timeout
+    while True:
+        hwnd = apps.foreground_top_level()
+        if hwnd and W.is_writer_window(hwnd) and hwnd not in ignore:
+            win = apps.control_for(hwnd)
+            if win is not None:
+                return win
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.25)
 
 
-def word_blank_document_tile(win, timeout=4):
-    """The 'Blank document' tile if `win` is showing Word's Start screen, else None."""
-    return start_screen_tile(win, "Blank document", timeout)
-
-
-def word_document(win=None, timeout=10):
-    """(window, editing surface) of a Word window (default: the one in front). The
-    surface is a DocumentControl named after the document, e.g. 'Document1'."""
-    win = win or foreground_word_window(timeout)
+def writer_document(win=None, timeout=10):
+    """(window, editing surface) of a Writer window (default: the one in front). The
+    surface is a DocumentControl named after the document, e.g. 'Untitled 1 - OpenOffice
+    Document'."""
+    win = win or foreground_writer_window(timeout)
     if not win:
         return None, None
-    doc = auto.DocumentControl(searchFromControl=win)
-    if not doc.Exists(maxSearchSeconds=timeout, searchIntervalSeconds=0.25):
-        return win, None
-    return win, doc
+    return win, W.document_control(win, timeout)
 
 
-def word_document_has_focus(doc):
-    """True if keyboard input would go into this Word document."""
-    focused = auto.GetFocusedControl()
-    if focused is None or doc is None:
-        return False
-    if foreground_word_window(timeout=0.5) is None:
-        return False
-    return focused.ControlType == auto.ControlType.DocumentControl or focused.ClassName == "_WwG"
-
-
-def word_document_text(doc):
-    """Current text of the document (Word ends paragraphs with '\\r'), or None."""
-    try:
-        return doc.GetTextPattern().DocumentRange.GetText(-1)
-    except Exception:
-        return None
-
-
-def open_word_document(human):
+def open_writer_document(human):
     """
-    Open Word from the Start menu and start a blank document (clicking the 'Blank
-    document' tile). Returns (window, document control) of the NEW window - documents
-    that were already open are never touched.
+    Open OpenOffice Writer from the Start menu; it starts on a new blank document
+    ('Untitled N'). Returns (window, document control) of the NEW window - documents that
+    were already open are never touched.
     """
-    win = open_office_blank(human, "word", WORD_WINDOW_CLASS, "Blank document")
-    win, doc = word_document(win)
+    already_open = set(W.writer_windows())
+    log("Opening OpenOffice Writer")
+    human.open_app(WRITER_APP)
+    win = foreground_writer_window(timeout=40, ignore=already_open)     # the first start is slow
+    if win is None:
+        raise TaskError("A new OpenOffice Writer window did not appear")
+    time.sleep(1.5)                            # the toolbars and the page need a moment to settle
+    human.place_new_window(win.NativeWindowHandle)
+    time.sleep(0.5)
+    win, doc = writer_document(win)
     if doc is None:
-        raise TaskError("Couldn't find the Word document area")
+        raise TaskError("Couldn't find the Writer document area")
     return win, doc
+
+
+def reopen_writer_document(human, path):
+    """
+    Open a saved document to carry on writing it: Writer from the Start menu, then the Open
+    dialog (Ctrl+O), the file's path, Enter. Writer replaces the untouched blank document
+    with the file. Returns (window, document control).
+    """
+    open_writer_document(human)
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    log(f"Opening {path}")
+    human.think("mental")
+    human.hotkey("ctrl", "o")
+    time.sleep(1.5)
+    human.think("scan", 0.6)
+    human.select_all_and_type(os.path.abspath(path))
+    human.think("confirm")
+    human.press("enter")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        win = foreground_writer_window(timeout=1)
+        if win is not None and stem in apps.window_title(win.NativeWindowHandle).lower():
+            time.sleep(1.0)
+            win, doc = writer_document(win)
+            if doc is not None:
+                return win, doc
+        time.sleep(0.3)
+    raise TaskError(f"Couldn't open {path} in Writer")
 
 
 def click_into_document(human, win, doc):
     """Click into the page like a person, put the caret at the end, and make sure
-    typing will go into this document (TaskError otherwise)."""
+    typing will go into this document (TaskError otherwise). The click goes near the top
+    of the page (Writer's document area also holds the grey desk around the page)."""
+    doc = W.document_control(win, timeout=2) or doc        # the element is replaced when the file is saved
     l, t, r, b = ui_elements.element_rect(doc)
-    top_of_page = (l + (r - l) * 0.25, t + 40, l + (r - l) * 0.75, t + min(160, (b - t) * 0.25))
+    top_of_page = (l + (r - l) * 0.3, t + 60, l + (r - l) * 0.7, t + min(180, (b - t) * 0.3))
     log("Clicking into the document")
     human.think("scan")
     human.click_field(top_of_page)
     human.think("glance")
     human.hotkey("ctrl", "end")                # caret at the end of the document
-    if not word_document_has_focus(doc):
-        log("Document not focused after click - activating Word")
+    time.sleep(0.3)
+    if not W.document_has_focus(win, doc):
+        log("Document not focused after click - activating Writer")
         win.SetActive()
         time.sleep(0.5)
-        if not word_document_has_focus(doc):
-            raise TaskError("The Word document doesn't have keyboard focus - stopping before typing anything")
+        if not W.document_has_focus(win, doc):
+            raise TaskError("The Writer document doesn't have keyboard focus - stopping before typing anything")
 
 
 def type_into_document(human, doc, text, revisions="heuristic", mode="compose"):
@@ -601,13 +635,13 @@ def type_into_document(human, doc, text, revisions="heuristic", mode="compose"):
         f"false-start keys {tags['false_start']}, lost-thought deletions {tags['lost']}, "
         f"arrow keys for revisions {tags['nav']})")
     time.sleep(0.5)
-    got = word_document_text(doc)
+    got = W.document_text(doc)
     if got is None:
         log("Couldn't read the document text back to check it")
-    elif got.translate(_QUOTES).rstrip().endswith(text.strip()):
+    elif W.normalise(got).endswith(W.normalise(text)):
         log("Document text matches what was typed")
     else:
-        log("Document text differs from the intended text (Word AutoCorrect or a missed key):")
+        log("Document text differs from the intended text (AutoCorrect, word completion or a missed key):")
         log(f"  got: {got.strip()[-300:]!r}")
     return plan
 
@@ -783,7 +817,7 @@ QUERIES = [            # mostly long Wikipedia articles: plenty to read and scro
 ]
 
 WRITING = [
-    WORD_PARAGRAPH,
+    WRITER_PARAGRAPH,
     "The main risk for the next release is the dependency on the new billing provider. Their "
     "sandbox has been unstable for the last two weeks, which has slowed down our integration "
     "testing. We have asked for a dedicated test account and expect an answer by Friday. If it "
@@ -815,12 +849,15 @@ class Workspace:
     get back to a window like a person (Alt+Tab when it is the previous window).
     """
 
-    def __init__(self, human, profile=None, profile_index=0, revisions="heuristic"):
+    def __init__(self, human, profile=None, profile_index=0, revisions="heuristic", research=None):
+        """research: a research.project.ResearchProject - browse() then searches for its
+        topic and takes notes from the pages read, write() types its paper."""
         self.human = human
+        self.research = research
         self.profile, self.profile_index = profile, profile_index
         self.revisions = revisions
         self.chrome = None               # window handle
-        self.word_win = self.word_doc = None
+        self.writer_win = self.writer_doc = None
         self.queries = list(QUERIES)
         human.rng.shuffle(self.queries)
         self.writing = [_sentences(p) for p in WRITING]
@@ -872,23 +909,67 @@ class Workspace:
             human.think("scan")
         else:
             self.chrome = open_browser(human, self.profile, self.profile_index)
+        if self.research is not None:                # research: the project's next query, notes taken
+            self.research_browse(seconds_left)
+            return
         query = self.queries.pop(0)
         self.queries.append(query)
         search_and_read(human, query, second_result=human.rng.random() < 0.5,
                         max_read=max(15.0, min(90.0, 0.4 * seconds_left)), allow_suggestion=True)
 
+    def research_browse(self, seconds_left):
+        """Search for the research topic and take notes from the results read (a researcher
+        reads more closely and longer than a casual browser)."""
+        proj = self.research
+        query, hint = proj.next_query()
+        log(f"Researching: {query!r}")
+        try:
+            # a second result more often than casual browsing (60%), up to 150 s per page; notes are
+            # taken as each page opens (on_page) and what scrolls into view is recorded (on_view)
+            search_and_read(self.human, query, link_hint=hint, second_result=self.human.rng.random() < 0.6,
+                            max_read=max(20.0, min(150.0, 0.5 * seconds_left)),
+                            on_page=proj.on_page, on_view=proj.on_view)
+        finally:
+            proj.save_notes()                         # keep what was read even if the search failed midway
+
+    def glance_at_source(self, seconds):
+        """While writing: switch back to the browser and re-read a little of the open page,
+        then return to Writer. False if there is no browser window to go back to."""
+        if not (self._alive(self.chrome) and self.back_to(self.chrome)):
+            return False
+        log("Checking something in the source")
+        self.human.think("scan")
+        read(self.human, seconds)
+        return True
+
     def write(self, seconds_left):
         human = self.human
-        if self.word_win is not None and self._alive(self.word_win.NativeWindowHandle) \
-                and self.back_to(self.word_win.NativeWindowHandle):
-            if not word_document_has_focus(self.word_doc):
-                click_into_document(human, self.word_win, self.word_doc)
+        # research: no material yet -> go and read first; a finished paper -> nothing left to write
+        if self.research is not None and not self.research.has_material():
+            log("Nothing to write about yet - researching first")
+            self.browse(seconds_left)
+            return
+        if self.research is not None and self.research.finished:
+            raise TaskError("The research paper is finished")
+        if self.writer_win is not None and self._alive(self.writer_win.NativeWindowHandle) \
+                and self.back_to(self.writer_win.NativeWindowHandle):
+            self.writer_doc = W.document_control(self.writer_win) or self.writer_doc   # replaced after a save
+            if not W.document_has_focus(self.writer_win, self.writer_doc):
+                click_into_document(human, self.writer_win, self.writer_doc)
         else:
-            self.word_win, self.word_doc = open_word_document(human)
-            click_into_document(human, self.word_win, self.word_doc)
+            research = self.research
+            if research is not None and research.saved and os.path.exists(research.doc_path):
+                # resuming a paper that was already saved: open that file, not a blank document
+                self.writer_win, self.writer_doc = reopen_writer_document(human, research.doc_path)
+            else:
+                self.writer_win, self.writer_doc = open_writer_document(human)
+            click_into_document(human, self.writer_win, self.writer_doc)
             self.written_any = False
+        if self.research is not None:                # the next section of the paper
+            self.research.write_next(self, seconds_left * 0.9)
+            return
         text = self._next_chunk(seconds_left)
-        type_into_document(human, self.word_doc, text, self.revisions)
+        type_into_document(human, self.writer_doc, text, self.revisions)
 
     def _next_chunk(self, seconds_left):
         """The next 1-4 sentences that fit the time left; a new paragraph starts with Enter."""

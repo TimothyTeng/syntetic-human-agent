@@ -572,6 +572,27 @@ def scroll_until_link_visible(text, exact=False, step=-3, max_scrolls=15, pause=
 
 # --- Page text ---------------------------------------------------------------
 
+def page_document(win=None):
+    """The current page's DocumentControl (accessibility requested first), or None.
+    Chrome must be in the foreground, as for find_links()."""
+    win = win or get_chrome_window(timeout=1)
+    if not win:
+        return None
+    _request_web_accessibility(win)
+    return _get_page_document(win)
+
+
+def page_text(max_chars=400_000):
+    """The WHOLE current page's text ('' if the page doesn't expose it). Block elements
+    are separated by line breaks."""
+    doc = page_document()
+    pattern = ui_elements.text_pattern(doc) if doc else None
+    try:
+        return pattern.DocumentRange.GetText(max_chars) if pattern else ""
+    except Exception:
+        return ""
+
+
 def page_text_nodes(area=None, min_words=3):
     """
     Visible text elements of the current page: (pattern, nodes), where nodes =
