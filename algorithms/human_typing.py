@@ -16,7 +16,9 @@ Works with no fitted files (built-in defaults); run
 `python -m algorithms.typing_model.fit_stats ...` to learn from the datasets.
 """
 
+import re
 import time
+from dataclasses import replace
 
 import numpy as np
 import pyautogui
@@ -40,7 +42,7 @@ def get_model():
 
 def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="heuristic",
                     allow_uncorrected=False, error_scale=1.0, revision_scale=1.0,
-                    pause_scale=0.7, max_pause=8.0, dry_run=False, **config):
+                    pause_scale=0.7, max_pause=8.0, dry_run=False, word_deletes=0.0, **config):
     """
     Type `text` into the focused window like a person would.
 
@@ -57,6 +59,8 @@ def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="he
                 and long-pause length (pause_scale 1.0 = timed-essay levels, which
                 feel slow for emails); max_pause caps any single pause (s)
     dry_run:    plan only, do not press keys
+    word_deletes: chance that deleting a run of whole words (false starts, lost
+                thoughts) is done word by word with Ctrl+Backspace (0 = never)
     Returns the keystroke plan (list of typing_model.planner.Keystroke).
     """
     rng = rng or np.random.default_rng()
@@ -67,6 +71,8 @@ def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="he
     if (cfg.mode or auto_mode(text)) == "compose":
         provider.prepare(text, rng)
     plan = plan_keystrokes(text, get_model(), rng, cfg, provider)
+    if word_deletes:
+        plan = use_word_deletes(plan, rng, word_deletes)
     if not dry_run:
         play(plan, rng)
     return plan
@@ -74,7 +80,52 @@ def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="he
 
 # --- Player ---------------------------------------------------------------------------
 
-_SPECIAL = {K.BKSP: "backspace", "\n": "enter", "\t": "tab", K.LEFT: "left", K.RIGHT: "right"}
+_SPECIAL = {K.BKSP: "backspace", K.WORD_BKSP: "backspace", "\n": "enter", "\t": "tab",
+            K.LEFT: "left", K.RIGHT: "right"}
+_WHOLE_WORDS = re.compile(r"(?:[A-Za-z0-9]+ )*[A-Za-z0-9]+ ?")
+
+
+def use_word_deletes(plan, rng, p=0.5, tags=("false_start", "lost")):
+    """
+    Replace runs of Backspaces that delete whole words (in false starts and lost-thought
+    deletions) by one Ctrl+Backspace per word, with probability p per run. Only runs
+    whose deleted text is plain words separated by single spaces, starting at a word
+    boundary, qualify - there Ctrl+Backspace's effect is exact (keys.word_delete_start).
+    Later keystrokes move earlier by the time saved.
+    """
+    buf, cur, out, saved, i = [], 0, [], 0.0, 0
+    while i < len(plan):
+        ks = plan[i]
+        if ks.key == K.BKSP and ks.tag in tags:
+            j = i
+            while j < len(plan) and plan[j].key == K.BKSP and plan[j].tag == ks.tag:
+                j += 1
+            n = j - i
+            seg = "".join(buf[cur - n:cur]) if n <= cur else ""
+            at_boundary = cur - n == 0 or buf[cur - n - 1] in " \n"
+            if n >= 3 and at_boundary and _WHOLE_WORDS.fullmatch(seg) and rng.random() < p:
+                k = len(seg.split())
+                new = [replace(plan[i + m], key=K.WORD_BKSP, press=plan[i + m].press - saved) for m in range(k)]
+                saved += plan[j - 1].press - plan[i + k - 1].press
+                out += new
+                del buf[cur - n:cur]
+                cur -= n
+                i = j
+                continue
+        out.append(replace(ks, press=ks.press - saved))
+        if ks.key in (K.BKSP,):
+            if cur > 0:
+                del buf[cur - 1]
+                cur -= 1
+        elif ks.key == K.LEFT:
+            cur = max(0, cur - 1)
+        elif ks.key == K.RIGHT:
+            cur = min(len(buf), cur + 1)
+        else:
+            buf.insert(cur, ks.key)
+            cur += 1
+        i += 1
+    return out
 
 
 def _physical(ch):
@@ -108,6 +159,25 @@ def build_timeline(plan, rng, timer=None):
         else:
             events.append((ks.press, 1, "down", name))
             events.append((ks.press + ks.hold, 2, "up", name))
+
+    # Ctrl runs: held around consecutive Ctrl+Backspaces, never while another key goes down
+    i, n = 0, len(plan)
+    while i < n:
+        if plan[i].key != K.WORD_BKSP:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and plan[j + 1].key == K.WORD_BKSP:
+            j += 1
+        lead, lag = timer.sample_shift(rng) if hasattr(timer, "sample_shift") else (0.08, 0.03)
+        prev_up = plan[i - 1].press + plan[i - 1].hold if i > 0 else plan[i].press - 1.0
+        down = float(np.clip(plan[i].press - lead, prev_up + 0.002, plan[i].press - 0.002))
+        last = plan[j]
+        hi = plan[j + 1].press - 0.002 if j + 1 < n else np.inf
+        up = float(np.clip(last.press + last.hold + abs(lag), last.press + last.hold + 0.002, hi))
+        events.append((down, 0, "down", "ctrl"))
+        events.append((up, 3, "up", "ctrl"))
+        i = j + 1
 
     # Shift runs
     i, n = 0, len(plan)

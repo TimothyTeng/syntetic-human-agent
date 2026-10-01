@@ -30,14 +30,18 @@ SW_MAXIMIZE, SW_RESTORE = 3, 9
 # --- Window ------------------------------------------------------------------
 
 def _chrome_windows():
-    """All top-level Chrome windows (UIA controls), including minimised ones."""
-    return [w for w in auto.GetRootControl().GetChildren()
-            if w.ClassName == CHROME_CLASS and w.Name]
+    """All top-level Chrome windows (UIA controls), including minimised ones. Found with
+    Win32 calls, so windows opening or closing meanwhile are skipped, not errors."""
+    controls = (apps.control_for(h, retries=1) for h in apps.top_level_windows(CHROME_CLASS, titled=True))
+    return [c for c in controls if c is not None]
 
 
 def _is_browser_window(win):
     """Normal browser windows are titled '<page title> - Google Chrome'."""
-    return win.Name.endswith(" - " + CHROME_TITLE)
+    try:
+        return apps.window_title(win.NativeWindowHandle).endswith(" - " + CHROME_TITLE)
+    except Exception:
+        return False
 
 
 def _foreground_chrome():
@@ -47,7 +51,10 @@ def _foreground_chrome():
     _user32.GetClassNameW(hwnd, buf, 64)
     if buf.value != CHROME_CLASS or not _user32.GetWindowTextLengthW(hwnd):
         return None
-    return auto.ControlFromHandle(hwnd)
+    try:
+        return apps.control_for(hwnd, retries=1)
+    except Exception:          # the window closed in between (e.g. the profile picker going away)
+        return None
 
 
 def open_chrome(timeout=config.DEFAULT_TIMEOUT, launch=None):
@@ -144,7 +151,10 @@ def get_profile_picker(timeout=0):
     deadline = time.time() + timeout
     while True:
         for w in _chrome_windows():
-            if w.Name != CHROME_TITLE:          # the picker window is titled just "Google Chrome"
+            try:
+                if apps.window_title(w.NativeWindowHandle) != CHROME_TITLE:   # the picker is titled just "Google Chrome"
+                    continue
+            except Exception:
                 continue
             _request_web_accessibility(w)
             if auto.ButtonControl(searchFromControl=w, RegexName=PROFILE_BUTTON_RE.pattern).Exists(0.5):
@@ -372,6 +382,37 @@ def close_tab():
     keyboard.hotkey("ctrl", "w")
 
 
+def tab_items(win=None):
+    """
+    The tabs of a Chrome window (UIA TabItem controls), left to right. Only tabs in
+    the tab strip count - tab widgets inside the web page are ignored.
+    """
+    win = win or get_chrome_window(timeout=1)
+    if not win:
+        return []
+    page = _get_page_document(win)
+    page_top = page.BoundingRectangle.top if page else None
+    tabs = [t for t in ui_elements.find_elements(win, "TabItemControl", max_depth=12)
+            if page_top is None or t.BoundingRectangle.bottom <= page_top]
+    return sorted(tabs, key=lambda t: t.BoundingRectangle.left)
+
+
+def selected_tab_index(tabs):
+    """Index of the active tab in tab_items() (None if it can't be told)."""
+    for i, tab in enumerate(tabs):
+        try:
+            if tab.GetSelectionItemPattern().IsSelected:
+                return i
+        except Exception:
+            pass
+    return None
+
+
+def tab_close_button(tab):
+    """The small close (x) button on a tab, or None."""
+    return ui_elements.find_element(tab, "Close", "ButtonControl", partial=True, timeout=0.5, search_depth=3)
+
+
 def switch_tab(n):
     """Switch to tab number n (1-8), or 9 = last tab (Ctrl+<n>)."""
     keyboard.hotkey("ctrl", str(n))
@@ -546,3 +587,78 @@ def page_text_nodes(area=None, min_words=3):
     if not doc:
         return None, []
     return ui_elements.text_pattern(doc), ui_elements.text_nodes(doc, area, min_words)
+
+
+def page_total_words(max_chars=400_000):
+    """Words in the WHOLE current page (not just what is in view), from its text
+    interface; 0 if the page doesn't expose its text."""
+    win = get_chrome_window(timeout=1)
+    doc = _get_page_document(win) if win else None
+    if doc is None:
+        return 0
+    try:
+        return len(doc.GetTextPattern().DocumentRange.GetText(max_chars).split())
+    except Exception:
+        return 0
+
+
+def page_view_signature(n=5):
+    """
+    Positions of the first few visible text elements of the page - changes whenever
+    the page scrolls. Used to notice the bottom of a page that doesn't report its
+    scroll position: scrolling down no longer changes it. None if no text is found.
+    """
+    _, nodes = page_text_nodes(min_words=1)
+    if not nodes:
+        return None
+    return tuple((n_["text"][:20], n_["rect"][1]) for n_ in nodes[:n])
+
+
+def page_word_count():
+    """Number of words in the page's currently visible text (0 if none found)."""
+    _, nodes = page_text_nodes(min_words=1)
+    return sum(len(n["text"].split()) for n in nodes)
+
+
+def page_scroll_state():
+    """
+    (scroll position %, visible part of the page %) of the current page, e.g.
+    (37.5, 20.0) = 37.5% scrolled down with a fifth of the page in view. 100% position
+    means the bottom is reached. None if the page doesn't report it (or can't scroll).
+    """
+    win = get_chrome_window(timeout=1)
+    doc = _get_page_document(win) if win else None
+    for ctrl in (doc, doc.GetParentControl() if doc else None):
+        if ctrl is None:
+            continue
+        try:
+            sp = ctrl.GetPattern(auto.PatternId.ScrollPattern)
+            if sp and sp.VerticallyScrollable:
+                return float(sp.VerticalScrollPercent), float(sp.VerticalViewSize)
+        except Exception:
+            pass
+    return None
+
+
+def page_has_keyboard_focus():
+    """
+    True if keys would go to the page itself (Chrome in front, focus on the page and
+    not in a text field or the address bar) - so PgDn / arrow keys scroll it.
+    """
+    fg = _foreground_chrome()
+    if fg is None or not _is_browser_window(fg):
+        return False
+    try:
+        focused = auto.GetFocusedControl()
+    except Exception:
+        return False
+    if focused is None:
+        return False
+    if focused.ControlType in (auto.ControlType.EditControl, auto.ControlType.ComboBoxControl):
+        return False
+    doc = _get_page_document(fg)
+    if doc is None:
+        return False
+    l, t, r, b = ui_elements.element_rect(doc)
+    fx, fy = ui_elements.element_center(focused)
+    return l <= fx <= r and t <= fy <= b

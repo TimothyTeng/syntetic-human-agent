@@ -10,9 +10,15 @@ Alternates between
     people read with the cursor: short hops, a pause on each word (longer for long
     words), now and then a step back, sometimes on to the next line.
 
-The movement itself comes from the trained model (via HumanMouse). The timing
-parameters below are hand-set placeholders for the future entropy work;
-they're collected in ReadingParams so they can be tuned or learned later.
+Scrolling is done with the wheel or, for keyboard-minded people, PgDn / arrow keys
+(only when the page itself has keyboard focus). Once the bottom of the page is
+reached the reader either scrolls back up to re-read something or is done.
+reading_time() sizes the whole read from the amount of text on the page.
+
+The movement itself comes from the trained model (via HumanMouse). Scroll timing -
+notches per burst, the gaps between them and the pauses between bursts - is learned
+from the Balabit dataset (mouse_model/scroll_stats.py, one real user's style per
+person) when ReadingParams.scroll is set; the remaining parameters are hand-set.
 """
 
 import time
@@ -35,8 +41,10 @@ class ReadingParams:
     notches_max: int = 5
     notch_gap_median: float = 0.07   # seconds between notches in a burst
     p_scroll_up: float = 0.12        # chance a burst scrolls back up
-    pause_median: float = 1.8        # seconds, reading pause
+    pause_median: float = 1.8        # seconds, reading pause (when no learned scroll timing)
     pause_sigma: float = 0.6         # log-normal spread of pauses
+    pause_max: float = 20.0          # longest single reading pause
+    scroll: object = None            # learned ScrollStats (notches, gaps, pauses); None = hand-set
     drift_max_px: int = 120
     # word tracing
     p_trace: float = 0.12            # ... tracing a line of text with the cursor
@@ -50,6 +58,14 @@ class ReadingParams:
     p_next_line: float = 0.25        # at the end of a line, sweep to the next one and continue
     p_line_start: float = 0.6        # start at the beginning of the line (else early in it)
     reading_wpm: float = 230.0
+    # scrolling method and end of page
+    p_key_scroll: float = 0.0        # chance a scroll burst uses PgDn / arrow keys (needs `human`)
+    p_page_key: float = 0.5          # ... PgDn/PgUp once, else a few arrow presses
+    end_percent: float = 99.0        # scroll position (%) that counts as the bottom
+    p_reread_at_end: float = 0.4     # at the bottom: scroll back up to re-read, else done
+    # reading_time(): web readers read only part of a page's text
+    read_fraction: float = 0.28
+    read_fraction_sigma: float = 0.5
 
 
 def _lognormal(rng, median, sigma):
@@ -67,48 +83,111 @@ def _inside(point, rect):
     return rect[0] <= point[0] <= rect[2] and rect[1] <= point[1] <= rect[3]
 
 
-def scroll_burst(rng, params=ReadingParams()):
-    """Scroll a few notches in quick succession. Returns notches scrolled (neg = down)."""
-    n = int(rng.integers(params.notches_min, params.notches_max + 1))
-    direction = 1 if rng.random() < params.p_scroll_up else -1
-    for _ in range(n):
+def scroll_burst(rng, params=ReadingParams(), direction=None):
+    """Scroll a few wheel notches in quick succession. Returns notches scrolled (neg = down)."""
+    learned = params.scroll
+    n = learned.sample_burst(rng) if learned else int(rng.integers(params.notches_min, params.notches_max + 1))
+    if direction is None:
+        direction = 1 if rng.random() < params.p_scroll_up else -1
+    for i in range(n):
+        if i:
+            time.sleep(learned.sample_gap(rng) if learned else _lognormal(rng, params.notch_gap_median, 0.4))
         mouse.scroll(direction)
-        time.sleep(_lognormal(rng, params.notch_gap_median, 0.4))
     return direction * n
 
 
-def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=None):
+def reading_pause(rng, params=ReadingParams()):
+    """Seconds of reading without scrolling (scaled by reading speed)."""
+    if params.scroll:
+        secs = params.scroll.sample_pause(rng, params.pause_max)
+    else:
+        secs = _lognormal(rng, params.pause_median, params.pause_sigma)
+    return min(secs * 230.0 / params.reading_wpm, params.pause_max)
+
+
+def key_scroll(human, rng, params=ReadingParams(), direction=-1):
+    """Scroll with the keyboard: PgDn/PgUp once, or a few arrow presses (direction -1 = down)."""
+    if rng.random() < params.p_page_key:
+        human.press("pagedown" if direction < 0 else "pageup")
+    else:
+        human.press("down" if direction < 0 else "up", presses=int(rng.integers(2, 7)))
+
+
+def read_page(hm, duration, page_rect=None, params=ReadingParams(), on_trace=None, human=None):
     """
-    Simulate reading the current page for about `duration` seconds.
+    Simulate reading the current page for about `duration` seconds. Returns early if
+    the reader reaches the bottom of the page and is done with it.
 
     hm:        HumanMouse instance (provides movement + rng).
     page_rect: web page area (controller.browser.get_page_rect()); if given,
                the cursor is first moved into the text column so wheel events
                reach the page. Word tracing needs it (it only traces inside it).
     on_trace:  optional callback(list of traced word dicts), e.g. for logging.
+    human:     optional behaviour.Human - enables keyboard scrolling
+               (params.p_key_scroll) and hand-switch (homing) time between devices.
     """
     rng = hm.rng
     area = reading_area(page_rect) if page_rect else None
+    use = human.use_device if human else (lambda device: None)
     if area and not _inside(mouse.get_position(), area):
+        use("mouse")
         hm.move_to(*targeting.random_point_in(area, rng))
 
     end = time.monotonic() + duration
     actions = ["scroll", "pause", "drift", "trace"]
     probs = np.array([params.p_scroll, params.p_pause, params.p_drift, params.p_trace if area else 0.0])
     probs = probs / probs.sum()
+    at_bottom = False
+    last_view = None                                  # for pages that don't report a scroll position
     while time.monotonic() < end:
         action = rng.choice(actions, p=probs)
         if action == "scroll":
-            scroll_burst(rng, params)
+            if at_bottom and rng.random() >= params.p_reread_at_end:
+                return                                  # read to the end - done with this page
+            direction = 1 if at_bottom or rng.random() < params.p_scroll_up else -1
+            if human and rng.random() < params.p_key_scroll and browser.page_has_keyboard_focus():
+                key_scroll(human, rng, params, direction)
+            else:
+                use("mouse")
+                scroll_burst(rng, params, direction)
+            state = browser.page_scroll_state()
+            if state is not None:
+                at_bottom = state[0] >= params.end_percent
+            elif direction < 0:                       # bottom = scrolling down moved nothing
+                view = browser.page_view_signature()
+                at_bottom = view is not None and view == last_view
+                last_view = view
+            else:
+                at_bottom, last_view = False, None
         elif action == "pause":
             remaining = end - time.monotonic()
-            time.sleep(max(0.0, min(_lognormal(rng, params.pause_median, params.pause_sigma), remaining)))
+            time.sleep(max(0.0, min(reading_pause(rng, params), remaining)))
         elif action == "drift":
+            use("mouse")
             hm.drift(params.drift_max_px, bounds=area)
         else:
+            use("mouse")
             traced = trace_text(hm, area, params)
             if traced and on_trace:
                 on_trace(traced)
+
+
+def reading_time(rng, params=ReadingParams(), lo=10.0, hi=120.0):
+    """
+    Seconds a person would spend on the current page: the page's words (visible words
+    scaled up by how much of the page is in view) times the share web readers actually
+    read (~28%, log-normal), at params.reading_wpm. Clipped to [lo, hi]; None if the
+    page exposes no text.
+    """
+    state = browser.page_scroll_state()
+    if state and 0 < state[1] < 100:                  # visible words scaled up to the whole page
+        words = browser.page_word_count() * 100.0 / state[1]
+    else:                                             # no scroll position: count the whole page's text
+        words = browser.page_total_words() or browser.page_word_count()
+    if not words:
+        return None
+    seconds = words * params.read_fraction / params.reading_wpm * 60.0
+    return float(np.clip(seconds * np.exp(rng.normal(0, params.read_fraction_sigma)), lo, hi))
 
 
 # --- Word tracing -----------------------------------------------------------------------

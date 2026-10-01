@@ -8,12 +8,14 @@ Used for:
 
 Special characters used inside keystroke plans:
     BKSP = "\b"   Backspace
+    WORD_BKSP     Ctrl+Backspace: delete the previous word (see word_delete_start)
     LEFT / RIGHT  arrow keys (in-text revisions)
 """
 
 import numpy as np
 
 BKSP = "\b"
+WORD_BKSP = "\x7f"
 LEFT = "\x1b[D"
 RIGHT = "\x1b[C"
 NAV_KEYS = {LEFT: "left", RIGHT: "right"}
@@ -88,10 +90,27 @@ VOCAB_INDEX = {c: i for i, c in enumerate(VOCAB)}
 PAD, OTHER = 0, 1
 
 
+def word_delete_start(buf, cur):
+    """
+    Where Ctrl+Backspace at caret `cur` deletes back to: one space right before the
+    caret (if any), then the letters/digits of the word before it - the behaviour of
+    Word, Notepad and browser text fields for plain words. Plans only use it where
+    that is exact (runs of whole words separated by single spaces).
+    """
+    i = cur
+    if i > 0 and buf[i - 1] == " ":
+        i -= 1
+    while i > 0 and buf[i - 1].isalnum():
+        i -= 1
+    return i
+
+
 def key_class(ch):
     """Map a character (or special key) to an index in VOCAB."""
     if ch is None:
         return PAD
+    if ch == WORD_BKSP:               # timed like Backspace
+        return VOCAB_INDEX[BKSP]
     if ch in NAV_KEYS:
         return VOCAB_INDEX["<nav>"]
     if ch in VOCAB_INDEX:

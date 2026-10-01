@@ -10,7 +10,7 @@ import os
 
 from .composition import CompositionStats
 from .errors import ErrorStats
-from .keys import BKSP, LEFT, RIGHT
+from .keys import BKSP, LEFT, RIGHT, WORD_BKSP, word_delete_start
 from .timing import BigramTimer
 
 DEFAULT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
@@ -58,6 +58,10 @@ def apply_plan(keystrokes, initial=""):
             if cur > 0:
                 del buf[cur - 1]
                 cur -= 1
+        elif k == WORD_BKSP:
+            start = word_delete_start(buf, cur)
+            del buf[start:cur]
+            cur = start
         elif k == LEFT:
             cur = max(0, cur - 1)
         elif k == RIGHT:
@@ -76,6 +80,8 @@ def describe(keystrokes, width=100):
             out.append(f"[{ks.iki:.1f}s]")
         if ks.key == BKSP:
             out.append("~")
+        elif ks.key == WORD_BKSP:
+            out.append("^")
         elif ks.key == LEFT:
             out.append("<")
         elif ks.key == RIGHT:

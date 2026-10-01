@@ -10,6 +10,7 @@ clickable point.
 """
 
 import ctypes
+import ctypes.wintypes
 import os
 import time
 
@@ -198,3 +199,40 @@ def ocr_lines(rect=None, min_conf=50):
                                           "rect": (l, t, l + data["width"][i], t + data["height"][i])})
     ordered = sorted(lines.values(), key=lambda ws: min(w["rect"][1] for w in ws))
     return [sorted(ws, key=lambda w: w["rect"][0]) for ws in ordered]
+
+
+def monitor_rects():
+    """(left, top, right, bottom) of every monitor, in physical pixels. Unlike
+    virtual_screen_rect(), this leaves out the dead areas between monitors of
+    different sizes, where the cursor can't go."""
+    rects = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.RECT),
+                        ctypes.c_void_p)
+    def _collect(_hmon, _hdc, rect, _data):
+        r = rect.contents
+        rects.append((r.left, r.top, r.right, r.bottom))
+        return 1
+
+    ctypes.windll.user32.EnumDisplayMonitors(None, None, _collect, 0)
+    return rects
+
+
+def on_screen(x, y, rects=None, margin=0):
+    """True if (x, y) lies on a monitor (at least `margin` px inside its edges)."""
+    for l, t, r, b in rects or monitor_rects():
+        if l + margin <= x < r - margin and t + margin <= y < b - margin:
+            return True
+    return False
+
+
+def nearest_on_screen(x, y, rects=None, margin=0):
+    """The point on any monitor (at least `margin` px inside) closest to (x, y)."""
+    best, best_d = (x, y), None
+    for l, t, r, b in rects or monitor_rects():
+        px = min(max(x, l + margin), r - 1 - margin)
+        py = min(max(y, t + margin), b - 1 - margin)
+        d = (px - x) ** 2 + (py - y) ** 2
+        if best_d is None or d < best_d:
+            best, best_d = (px, py), d
+    return best
