@@ -48,8 +48,9 @@ class TypingModel:
         return cls(timer, errors, comp, sources)
 
 
-def apply_plan(keystrokes, initial=""):
-    """Replay a plan into a virtual text field (cursor starts at the end). Returns the text."""
+def apply_plan(keystrokes, initial="", word_delete_style="windows"):
+    """Replay a plan into a virtual text field (cursor starts at the end). Returns the text.
+    word_delete_style: how Ctrl+Backspace behaves (keys.word_delete_start)."""
     buf = list(initial)
     cur = len(buf)
     for ks in keystrokes:
@@ -59,7 +60,7 @@ def apply_plan(keystrokes, initial=""):
                 del buf[cur - 1]
                 cur -= 1
         elif k == WORD_BKSP:
-            start = word_delete_start(buf, cur)
+            start = word_delete_start(buf, cur, word_delete_style)
             del buf[start:cur]
             cur = start
         elif k == LEFT:

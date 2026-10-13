@@ -15,15 +15,29 @@ next one is tried, and the result is checked through UI Automation where Writer 
 it (paragraph style and font size at the caret, caret in a table, document focus). Writer
 doesn't report bold / italic / alignment, so those follow the executor's own model.
 
+Formatting is applied before typing (toggle, then type) or afterwards (writer_ops' select /
+deselect): the text just typed is highlighted - keyboard people hold Ctrl+Shift and tap
+Left once per word or press Shift+Home, mouse people drag across the line or triple-click
+it - formatted with a shortcut or the toolbar, and the caret is put back at the end
+(Ctrl+End / End). Nothing is ever typed while text is selected. A selection's font size is
+set with Ctrl+] / Ctrl+[ (checked against the Font Size box) or the Font Size box.
+
 Text is typed with the learned typing model (typos, corrections, thinking pauses), one
 run at a time, so its corrections never cross a formatting boundary. When Writer's word
 completion offers the rest of a long word after a run, it is dismissed (Delete) before
 Enter could accept it.
 
+Where Writer exposes nothing to UI Automation (controller.writer.is_inaccessible) the
+executor works blind: shortcuts only, styles without a shortcut and font sizes from the
+boxes are left out (typing into a box that may not have the focus could replace the
+document), a selection is resized with Ctrl+] presses, word-completion suggestions are
+dismissed whenever one could be showing, and nothing is read back.
+
 dry_run=True performs nothing and records the actions it would take (self.actions).
 """
 
 import os
+import re
 import time
 from collections import Counter
 
@@ -68,6 +82,8 @@ class WriterExecutor:
         self.in_table = False
         self.style_checked = False             # the caret's paragraph style was compared with Writer's
         self.skipping_table = False
+        self.selecting = False                 # text is highlighted (between select and deselect)
+        self.long_words = set()                # words of 8+ letters typed (Writer's word completion offers them)
         self.actions = []                      # dry run: what would have been done
         self.methods = Counter()               # how each kind of operation was done (for the log)
         self.problems = []
@@ -118,6 +134,8 @@ class WriterExecutor:
             if op.kind == "exit_table":
                 self.skipping_table = False
             return
+        if self.selecting and op.kind not in ("bold", "italic", "size", "deselect"):
+            raise TaskError(f"{op.kind} while text is selected - it could replace the selection")
         getattr(self, "op_" + op.kind)(op)
 
     # --- primitives (recorded instead of performed in a dry run) --------------------------------
@@ -148,6 +166,7 @@ class WriterExecutor:
             return None
         kw = {"error_scale": 0.0} if exact else {}
         kw["word_safe"] = True       # a misspelled word never gets a space after it (AutoCorrect)
+        kw["word_delete_style"] = "openoffice"   # Ctrl+Backspace takes the space before the word too
         if mode == "compose":
             return self.human.type(text, mode="compose", revisions=self.revisions, max_pause=4.0, **kw)
         return self.human.type(text, mode="transcribe", **kw)
@@ -168,6 +187,11 @@ class WriterExecutor:
         """Whether this person uses the keyboard (rather than the mouse) for this action;
         bias > 0 makes the keyboard more likely, for actions with a well-known shortcut."""
         return self.human.prefers_keyboard(bias)
+
+    @property
+    def blind(self):
+        """Writer exposes nothing to UI Automation: work by keyboard, without checks."""
+        return not self.dry_run and self.win is not None and W.is_inaccessible(self.win)
 
     # --- focus ---------------------------------------------------------------------------------
 
@@ -243,6 +267,7 @@ class WriterExecutor:
         self._type(op.a, op.b)
         if not self.dry_run:
             self._dismiss_completion(op.a)
+        self.long_words |= {w.lower() for w in re.findall(r"[A-Za-z]{8,}", op.a)}
 
     def _check_style(self):
         """The paragraph about to be typed in should have self.style; Writer's "next style"
@@ -258,6 +283,14 @@ class WriterExecutor:
     def _dismiss_completion(self, typed):
         """If word completion is offering the rest of a word (selected text after the caret),
         press Delete: Enter would accept it and Tab / typing on could keep it."""
+        if self.blind:                           # can't see it: dismiss whenever one could be showing
+            tail = re.search(r"[A-Za-z]{3,}$", typed or "")
+            if tail and any(w.startswith(tail.group(0).lower()) and w != tail.group(0).lower()
+                            for w in self.long_words):
+                self._think("glance", 0.5)
+                self._press("delete")             # at the end of the document Delete changes nothing else
+                self.methods["completion:dismissed_blind"] += 1
+            return
         n = W.pending_completion(self.doc, typed)
         if n:
             self.log(f"Word completion offers {n} more letters after {typed[-20:]!r} - dismissing it")
@@ -377,6 +410,62 @@ class WriterExecutor:
         """Nothing to do in Writer (run() handles checkpoints)."""
         pass
 
+    # --- highlighting what was typed ---------------------------------------------------------------
+
+    def op_select(self, op):
+        """Highlight the end of the paragraph just typed: its last op.a words ('words') or the
+        whole one-line paragraph ('line'). Mouse people drag across the line or triple-click it
+        (only for a line - single words can't be located on screen); otherwise Shift+Home for
+        a line, or Ctrl+Shift+Left once per word (op.a for a line too, as a fallback)."""
+        self.ensure_focus()
+        self._think("glance")                     # find where the highlight starts
+        how = None
+        if op.b == "line" and not self._keyboard(0.1):
+            how = self._select_line_by_mouse()
+        if how is None and op.b == "line" and self.human.rng.random() < 0.6:
+            self._hotkey("shift", "home")
+            how = "shift_home"
+        if how is None:
+            if self.dry_run:
+                self.actions.append(f"HOTKEY ctrl+shift+left x{op.a}")
+            else:
+                self.human.hotkey_repeat("ctrl", "shift", "left", presses=op.a)
+            how = "ctrl_shift_left"
+        self.selecting = True
+        self.methods[f"select:{how}"] += 1
+        self._think("glance", 0.6)                # check the highlight
+
+    def _select_line_by_mouse(self):
+        """Drag from the left of the paragraph's line to past its end, or triple-click on it;
+        the name of the way used, or None if the paragraph isn't on screen."""
+        drag = self.human.rng.random() < 0.6
+        if self.dry_run:
+            self.actions.append("DRAG across the line" if drag else "TRIPLE-CLICK the line")
+            return "drag" if drag else "triple_click"
+        rect = W.end_paragraph_rect(self.doc)
+        if rect is None:
+            return None
+        l, t, r, b = rect
+        y = t + min((b - t) / 2, 18)              # the first line of the paragraph
+        rng = self.human.rng
+        if drag:
+            self.human.drag((l + rng.uniform(2, 10), y + rng.normal(0, 1.5)),
+                            (r - rng.uniform(2, 15), y + rng.normal(0, 1.5)))
+            return "drag"
+        self.human.multi_click_rect((l + (r - l) * 0.3, y - 3, l + (r - l) * 0.6, y + 3), 3)
+        return "triple_click"
+
+    def op_deselect(self, op):
+        """Put the caret back at the end of the text: Ctrl+End (End for a line). The caret
+        then carries the highlighted text's formatting."""
+        if self.human.rng.random() < 0.3:
+            self._press("end")                     # the selection ended at the end of a line
+            if not self.dry_run:
+                time.sleep(0.15)
+        self._hotkey("ctrl", "end")
+        self.selecting = False
+        self.style_checked = True                 # the same paragraph: its style was set already
+
     # --- styles ----------------------------------------------------------------------------------
 
     def op_style(self, op):
@@ -389,6 +478,13 @@ class WriterExecutor:
         self.style = style
         self.style_checked = True
         keys = STYLE_KEYS.get(style)                 # None: the style has no shortcut
+        if self.blind:                               # only a shortcut is safe without seeing the boxes
+            if keys:
+                self._hotkey(*keys)
+                self.methods["style:keys_blind"] += 1
+            else:
+                self.problems.append(f"style {style!r} left out (Writer not accessible)")
+            return
         if self._keyboard(0.2):
             methods = ([self._style_by_keys] if keys else []) + [self._style_by_box_keys, self._style_by_box_click]
         else:
@@ -454,6 +550,11 @@ class WriterExecutor:
         keyboard (Ctrl+F11 to the Apply Style box, Tab, Tab). Checked against the size
         Writer reports at the caret."""
         pt = f"{op.a:g}"                           # 12.0 -> '12', 10.5 -> '10.5'
+        if self.selecting and (self.blind or self._keyboard(0.1)) and self._size_by_steps(op.a):
+            return
+        if self.blind:                           # the boxes can't be confirmed to have the focus
+            self.problems.append(f"font size {pt} left out (Writer not accessible)")
+            return
         if self._keyboard(0.1):
             done = self._size_by_keys(pt) or self._size_by_box(pt)
         else:
@@ -465,6 +566,38 @@ class WriterExecutor:
         if not done:
             self.problems.append(f"couldn't set font size {pt}")
             self.log(f"Couldn't set the font size to {pt} pt")
+
+    def _size_by_steps(self, target):
+        """With text highlighted: Ctrl+] (bigger) or Ctrl+[ (smaller) one step at a time,
+        looking at the Font Size box after each, until it shows `target`. False (nothing
+        more pressed) once a step passes it or nothing changes - the box then sets it."""
+        if self.dry_run:
+            self.actions.append("HOTKEY ctrl+] (until the size shows)")
+            self.methods["size:steps"] += 1
+            return True
+        if self.blind:                           # can't read the size: a few steps the right way
+            steps = int(min(6, max(1, round(abs(target - 12.0) / 3.5))))
+            for _ in range(steps):
+                self._hotkey("ctrl", "]" if target > 12.0 else "[")
+                time.sleep(0.2)
+            self.methods["size:steps_blind"] += 1
+            return True
+        size = W.caret_font_size(self.win)
+        for _ in range(6):
+            if size is None:
+                return False
+            if abs(size - target) < 0.05:
+                self.methods["size:steps"] += 1
+                return True
+            up = target > size
+            self._hotkey("ctrl", "]" if up else "[")
+            time.sleep(0.25)
+            new = W.caret_font_size(self.win)
+            if new is None or abs(new - size) < 0.05 or (new > target if up else new < target):
+                return False                     # no effect, or stepped past the size meant
+            size = new
+            self._think("glance", 0.5)
+        return False
 
     def _size_by_keys(self, pt):
         """Ctrl+F11 (Apply Style box), Tab (Font Name), Tab (Font Size): type the size, Enter.
@@ -612,6 +745,8 @@ class WriterExecutor:
     def _table_inserted(self, before):
         """True if the caret is now in a table, or (when UIA can't tell) there are more
         tables than `before`."""
+        if self.blind:                           # can't tell: the dialog was filled and confirmed
+            return True
         in_table = W.caret_in_table(self.doc)
         return bool(in_table) or (in_table is None and (W.table_count(self.doc) or 0) > before)
 

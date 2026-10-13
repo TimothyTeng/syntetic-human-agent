@@ -11,7 +11,9 @@ Human-like typing, driven by the learned typing model (algorithms/typing_model).
           after it), executed with sub-millisecond waits.
 
 The final text in the field is exactly `text` (unless allow_uncorrected=True).
-Assumes the caret is at the end of the field and nothing else types meanwhile.
+Assumes the caret is at the end of the field and nothing else types meanwhile. If another
+window comes to the front part way through, typing stops at once (FocusLost) so the rest of
+the text never lands in the wrong program.
 Works with no fitted files (built-in defaults); run
 `python -m algorithms.typing_model.fit_stats ...` to learn from the datasets.
 """
@@ -23,7 +25,8 @@ from dataclasses import replace
 import numpy as np
 import pyautogui
 
-from controller import keyboard
+from controller import apps, keyboard
+from algorithms.session import TaskError
 from algorithms.typing_model import keys as K
 from algorithms.typing_model.alternatives import make_provider
 from algorithms.typing_model.planner import TypingConfig, auto_mode, plan_keystrokes
@@ -42,7 +45,8 @@ def get_model():
 
 def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="heuristic",
                     allow_uncorrected=False, error_scale=1.0, revision_scale=1.0,
-                    pause_scale=0.7, max_pause=8.0, dry_run=False, word_deletes=0.0, **config):
+                    pause_scale=0.7, max_pause=8.0, dry_run=False, word_deletes=0.0, word_delete_style="windows",
+                    focus_guard=True, **config):
     """
     Type `text` into the focused window like a person would.
 
@@ -61,6 +65,12 @@ def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="he
     dry_run:    plan only, do not press keys
     word_deletes: chance that deleting a run of whole words (false starts, lost
                 thoughts) is done word by word with Ctrl+Backspace (0 = never)
+    word_delete_style: what Ctrl+Backspace deletes in the target program - "windows"
+                (Word, Notepad, browsers) or "openoffice" (Writer also deletes the space
+                before the word; see keys.word_delete_start)
+    focus_guard: stop (FocusLost) if the window in front changes while typing. Off only
+                where focus is meant to move, e.g. typing into Start, which hands over to
+                Windows Search after the first letter
     Returns the keystroke plan (list of typing_model.planner.Keystroke).
     """
     rng = rng or np.random.default_rng()
@@ -72,9 +82,9 @@ def type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="he
         provider.prepare(text, rng)
     plan = plan_keystrokes(text, get_model(), rng, cfg, provider)
     if word_deletes:
-        plan = use_word_deletes(plan, rng, word_deletes)
+        plan = use_word_deletes(plan, rng, word_deletes, style=word_delete_style)
     if not dry_run:
-        play(plan, rng)
+        play(plan, rng, focus_guard=focus_guard)
     return plan
 
 
@@ -85,13 +95,16 @@ _SPECIAL = {K.BKSP: "backspace", K.WORD_BKSP: "backspace", "\n": "enter", "\t": 
 _WHOLE_WORDS = re.compile(r"(?:[A-Za-z0-9]+ )*[A-Za-z0-9]+ ?")
 
 
-def use_word_deletes(plan, rng, p=0.5, tags=("false_start", "lost")):
+def use_word_deletes(plan, rng, p=0.5, tags=("false_start", "lost"), style="windows"):
     """
     Replace runs of Backspaces that delete whole words (in false starts and lost-thought
     deletions) by one Ctrl+Backspace per word, with probability p per run. Only runs
     whose deleted text is plain words separated by single spaces, starting at a word
     boundary, qualify - there Ctrl+Backspace's effect is exact (keys.word_delete_start).
     Later keystrokes move earlier by the time saved.
+    style 'openoffice': Writer's Ctrl+Backspace also deletes the space before the words, so
+    a run only qualifies after exactly one space following a letter or digit, and the
+    person types that space again afterwards (as a Writer user does on seeing it gone).
     """
     buf, cur, out, saved, i = [], 0, [], 0.0, 0
     while i < len(plan):
@@ -102,11 +115,22 @@ def use_word_deletes(plan, rng, p=0.5, tags=("false_start", "lost")):
                 j += 1
             n = j - i
             seg = "".join(buf[cur - n:cur]) if n <= cur else ""
-            at_boundary = cur - n == 0 or buf[cur - n - 1] in " \n"
+            s = cur - n
+            if style == "openoffice":       # ' word' goes: needs 'x word' (one space after a letter/digit)
+                at_boundary = s >= 2 and buf[s - 1] == " " and buf[s - 2].isalnum()
+            else:
+                at_boundary = s == 0 or buf[s - 1] in " \n"
             if n >= 3 and at_boundary and _WHOLE_WORDS.fullmatch(seg) and rng.random() < p:
                 k = len(seg.split())
                 new = [replace(plan[i + m], key=K.WORD_BKSP, press=plan[i + m].press - saved) for m in range(k)]
                 saved += plan[j - 1].press - plan[i + k - 1].press
+                if style == "openoffice":    # the space before the words went too: type it again
+                    last = plan[i + k - 1]
+                    gap = plan[i + k].press - last.press if i + k < j else 0.15
+                    gap = float(np.clip(max(gap, last.hold + 0.05), 0.08, 0.5))
+                    new.append(replace(last, key=" ", tag="revise", press=new[-1].press + gap, iki=gap,
+                                       long=False, force=""))
+                    saved -= gap
                 out += new
                 del buf[cur - n:cur]
                 cur -= n
@@ -232,15 +256,27 @@ def _run_events(events):
             keyboard.key_up(key)
 
 
-def play(plan, rng=None):
-    """Execute a keystroke plan on the focused window."""
+class FocusLost(TaskError):
+    """Another window came to the front while typing - typing stopped part way through."""
+
+
+def play(plan, rng=None, focus_guard=True):
+    """Execute a keystroke plan on the focused window. focus_guard: before every key goes
+    down, check the same window is still in front; if not, let go of every key and raise
+    FocusLost (a dialog popped up, another program started, someone clicked elsewhere)."""
     rng = rng or np.random.default_rng()
     events = build_timeline(plan, rng)
+    target = apps.foreground_top_level() if focus_guard else 0
     held = set()
     t0 = time.perf_counter()
     try:
         for t, _, action, key in events:
             _wait_until(t0 + t)
+            if target and action != "up":
+                now = apps.foreground_top_level()
+                if now != target:
+                    raise FocusLost(f"'{apps.window_title(now) or apps.window_class(now)}' came to the front "
+                                    f"while typing into '{apps.window_title(target)}' - stopped typing")
             if action == "down":
                 keyboard.key_down(key)
                 held.add(key)
@@ -322,3 +358,33 @@ def hotkey_like_human(*keys, rng=None, timer=None, wpm=45):
         _, lag = model_timer.sample_shift(rng)
         events.append((max(t_main + 0.015, t_main + hold + lag + 0.02 * i), "up", m))
     _run_events(events)
+
+
+def chord_repeat_like_human(mods, key, presses=1, rng=None, timer=None, wpm=45):
+    """
+    Hold modifiers and tap a key several times, e.g. Ctrl+Shift held while Left is tapped
+    three times to select three words back. The modifiers lead the first tap and are let go
+    after the last one, with the same learned timing as hotkey_like_human; the taps follow
+    each other with learned key-to-key intervals.
+    """
+    rng = rng or np.random.default_rng()
+    timer = timer or key_timer(wpm, rng)
+    model_timer = get_model().timer
+    events, t = [], 0.0
+    for i, m in enumerate(mods):
+        if i:
+            t += float(np.clip(0.05 * np.exp(rng.normal(0, 0.5)), 0.015, 0.25))
+        events.append((t, "down", m))
+    lead, _ = model_timer.sample_shift(rng) if mods else (0.0, 0.0)
+    t = t + float(np.clip(lead, 0.03, 0.6))
+    tk, prev, last_up = _timing_key(key), None, t
+    for i in range(presses):
+        iki, hold = timer.sample(prev, tk)
+        if i:
+            t = max(t + iki, last_up + 0.01)          # the previous tap must be released first
+        events += [(t, "down", key), (t + hold, "up", key)]
+        last_up, prev = t + hold, tk
+    for i, m in enumerate(reversed(mods)):
+        _, lag = model_timer.sample_shift(rng)
+        events.append((max(last_up + 0.02, last_up + lag + 0.02 * i), "up", m))
+    _run_events(sorted(events, key=lambda e: e[0]))

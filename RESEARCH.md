@@ -46,7 +46,8 @@ The writing **reads like a careful student's compiled report**, not original ana
 ## 2. Quick start
 
 ```bash
-python main.py --process research --topic "Apollo program" --minutes 45      # browse, take notes, write the paper
+python main.py --process research --topic "Apollo program"                   # 15 min browsing + notes, 15 min writing
+python main.py --process research --topic "Apollo program" --write-minutes 30  # more time to write the paper
 python main.py --process research --resume runs/research/apollo-program-...   # carry on with an earlier run
 python main.py --process session --topic "Apollo program" --minutes 30        # the random Session does the research
 python main.py --process compose --notes tests/fixtures/pages --topic "Apollo program" --dry-run   # offline, no UI
@@ -59,14 +60,15 @@ python -m unittest discover -s tests -t .           # offline tests
 | Flag | Meaning |
 |---|---|
 | `--topic` | What to research. |
-| `--minutes` | Total time. Reading takes at most 35% of it (45% from 45 minutes up). The rest is writing. |
-| `--sources 4` | How many pages to read before writing. |
+| `--browse-minutes 15` | The browsing phase: searches, results, links followed in the articles; notes from every page. Chrome is closed at its end. |
+| `--write-minutes 15` | The writing phase: the paper is composed to fit it, typed, saved, and Writer is closed at its end. |
+| `--sources 4` | Pages needed before a paper can be written (more are read while the browsing phase lasts). |
 | `--words` | Paper length. By default it is whatever fits the time left. |
 | `--paraphrase 0\|1\|2` | 0 = sentences as read. 1 = phrase rewrites and date moves. 2 = also "According to …". |
 | `--resume DIR` | Continue a run: the notes, the composed paper and how far the writing got. |
 | `--notes DIR`, `--dry-run` | Compose only. Notes come from a run folder or a folder of page captures. `--dry-run` lists the Writer actions. |
 
-A 30-minute run writes roughly 20 of the paper's 27 blocks at a typical persona's pace. To finish a whole paper, use `--minutes 45` or more, or `--resume`. See [§12](#12-findings-from-live-testing).
+The paper is composed to fit the writing phase, so a typical persona finishes a shorter paper in 15 minutes; a longer phase (`--write-minutes 30`) gives the full frame, and `--resume` carries on an unfinished one. See [§12](#12-findings-from-live-testing).
 
 Everything a run produces goes to `runs/research/<topic>-<yyyymmdd-hhmm>/`:
 
@@ -206,14 +208,14 @@ Intervals are merged per source. A paragraph counts as *seen* if its position fa
 
 `ResearchNotes.add()` gives each source a number. A page read twice (same URL, ignoring scheme, `www`, fragment and trailing slash) **replaces** its earlier notes and merges the seen intervals, so it doesn't become a second source.
 
-**Search plan** (`compose.plan_queries`). The queries come in this order:
+**Search plan** (`compose.plan_queries`). The event network lets through only the sites in `sites.ALLOWED_HOSTS` (no search engine, no Wikipedia), so every search runs on an allowed site's own search page (`sites.SITE_SEARCH`): the person types e.g. `apnews.com/search?q=apollo+program` into the address bar. The queries come in this order, as (query, site):
 
-1. `"<topic> wikipedia"`, with link hint `wikipedia`.
-2. `"<topic> britannica"`.
-3. `"<topic> <heading>"` for the three longest **top-level** headings of the first page read, excluding minor ones such as "Name", "Etymology" and "Overview".
-4. Fallbacks: `history`, `significance`, `facts`.
+1. The topic on AP News.
+2. The topic on Coursera.
+3. `"<topic> <heading>"` on AP News for the three longest **top-level** headings of the first page read, excluding minor ones such as "Name", "Etymology" and "Overview".
+4. Fallbacks on AP News: `history`, `impact`, `future`.
 
-Results are still chosen through the existing `choose_link` and `ALLOWED_DOMAINS`. A result that needs no hint is one of the top results, with upper ones more likely.
+Results are the links whose address matches the site's result pattern (`sites.is_result`: AP News `/article/`, Coursera `/learn/`, `/articles/`, ...), one per result; one of the top ones is opened, upper ones more likely. The sites' own results pages are never taken as sources (`project.is_search_page`).
 
 ---
 
@@ -420,6 +422,7 @@ The renderer is a **state machine**. It keeps track of what Writer's state will 
 | `type text mode` | One run. Mode is `compose` from 12 words up, otherwise `transcribe`. |
 | `enter`, `page_break` | A new paragraph, or Ctrl+Enter. |
 | `table rows cols`, `next_cell`, `exit_table` | Insert a table, Tab to the next cell, Ctrl+End out of it. |
+| `select n words\|line`, `deselect` | Formatting **afterwards**: highlight the last *n* words (or the whole one-line paragraph) just typed; the `bold` / `italic` / `size` that follow apply to the selection; `deselect` puts the caret back at the end. |
 | `checkpoint i`, `save` / `save final` | Block *i* is done (a writing session may stop here), and a save at a section boundary. |
 
 Rules the renderer relies on, each checked in Writer 4.1 ([§12.4](#124-moving-to-openoffice-writer)):
@@ -432,6 +435,7 @@ Rules the renderer relies on, each checked in Writer 4.1 ([§12.4](#124-moving-t
 - **Tables.** Insert the table, type the cells with Tab between them, never after the last cell (that would add a row), make header cells bold, then Ctrl+End. Everything is written at the end of the document, so the caret lands in the empty paragraph after the table. Each new cell starts unformatted.
 - **After a table or a page break** the caret already sits in a fresh paragraph, so no Enter is needed.
 - **Checkpoints and saves.** A checkpoint follows every block, and a save comes before each new Heading 1 section. The final save is always done.
+- **Formatting afterwards** (`render(doc, rng, p_post=0.4)`). People also type first and format later. With an rng, `p_post` of the eligible bold / italic runs are typed plain, then highlighted and formatted, and a title with its own size (`Title.size`) is always resized that way. Eligible: a whole paragraph short enough for one line (`chars × pt ≤ 900`), or up to five plain words that start the paragraph or follow a space, so Ctrl+Shift+Left once per word lands exactly on the run's start. After `deselect` the caret carries the formatting (typing on after bold text continues bold), so the renderer's state follows as after a toggle. The render seed is saved in `progress.json`, so a resumed run renders the same operations; without an rng nothing changes.
 
 ### 7.3 The offline Writer model (`fake_writer.py`)
 `FakeWriter` executes the operations with Writer's semantics:
@@ -439,7 +443,8 @@ Rules the renderer relies on, each checked in Writer 4.1 ([§12.4](#124-moving-t
 - next styles after Enter, with bullets, direct formatting and direct alignment carried over;
 - bold, italic and bullets as **toggles**, alignment keys that set, a style clearing direct alignment and a heading style dropping bullets;
 - Ctrl+M asserted to happen only in an empty paragraph, and typing into a title, heading or caption with direct formatting still at the caret asserted not to happen;
-- each table cell starting unformatted, Tab in the last cell adding a row, Ctrl+End leaving the table.
+- each table cell starting unformatted, Tab in the last cell adding a row, Ctrl+End leaving the table;
+- with text selected, bold / italic / size applying to the selection (a toggle on a selection that already has the formatting is asserted not to happen), and typing while text is selected asserted not to happen.
 
 The tests check that `FakeWriter().run(render(doc)).result() == expected(doc)` for many random papers. Any renderer bug that would leave formatting on, toggle it the wrong way, un-centre text or break a table fails offline, without Writer.
 
@@ -461,6 +466,7 @@ Each operation is done the way *this* person would do it. `human.prefers_keyboar
 | Centre / left | Ctrl+E / Ctrl+L | Centred / Align Left button | Ctrl key. |
 | Table | Ctrl+F12 (Insert Table dialog): Tab, columns, Tab, rows, Enter | Insert › Table… | The other way. The dialog's Heading option is unticked if ticked. **Check:** the caret is in a table, or the table count grew. |
 | Page break | Ctrl+Enter | Insert › Manual Break… › Page break › OK | Ctrl+Enter. |
+| Highlight (format afterwards) | Hold Ctrl+Shift and tap Left once per word; Shift+Home for a line | Drag across the line, or triple-click it (a line only: single words can't be located on screen, so mouse people highlight words with the keys too) | Keys if the paragraph isn't on screen. Then Ctrl+B / toolbar Bold, and for a size Ctrl+] / Ctrl+[ step by step until the Font Size box shows it (else the box). Back to the end with Ctrl+End. Nothing is typed while text is selected (`TaskError`). |
 | Save | First Save As (Ctrl+Shift+S, full path, `.odt`); after that Ctrl+S | The Save button on the Standard toolbar | After the first save, about 60% of section boundaries also get a save. (F12 in Writer switches numbering on, Ctrl+F12 inserts a table.) |
 
 ### 8.2 Guards
@@ -473,7 +479,7 @@ Each operation is done the way *this* person would do it. `human.prefers_keyboar
 - **Typing is `word_safe`.** AutoCorrect rewrites a misspelled word as soon as a space follows it. If the typing model then fixes its typo itself, it edits text that is no longer what it typed, and a letter goes missing. With `TypingConfig.word_safe`, a typo is always corrected **before its word ends**. See [§12.2](#122-the-lost-letter-investigation).
 
 ### 8.3 Timing
-- `ResearchProject.block_seconds(i)` estimates the next block: its characters at the persona's effective rate, plus 2 s per formatting step.
+- `WritingProject.block_seconds(i)` estimates the next block: its characters at the persona's effective rate, plus 2 s per formatting step.
 - A block is **not started** if it wouldn't finish before the deadline. This is checked before the first block of a writing turn as well as at every checkpoint.
 - When time runs out, the person saves (Ctrl+S) before stopping.
 
@@ -481,15 +487,13 @@ Each operation is done the way *this* person would do it. `human.prefers_keyboar
 
 ## 9. Orchestration
 
-### 9.1 `--process research` (`main.run_research` / `research_flow`)
-1. **Read.** Browse until `--sources` pages are read, or until the reading share is used up: 35% of the time for runs under 45 minutes, 45% otherwise. Short runs keep enough time to write.
-   - Each search is `Workspace.research_browse`. A person reads up to 150 s per page, sometimes a second result, and notes are taken from every page.
-   - A failed search is logged and the next one tried. That includes a result that won't open and unexpected UIA errors; the corner-slam emergency stop always ends the run.
-2. **Compose** the paper to fit about 85% of the remaining time. It is written to `outline.json` and `paper.md`.
-3. **Write** one section per turn (`ResearchProject.write_next`), opening Writer, or reopening the saved `.odt` when resuming.
-   - Between sections there is a 30% chance of "checking something in the source": Alt+Tab to Chrome, read 8–25 s, back to Writer.
-   - The loop stops when nothing more fits.
-4. **Finish.** Save, then print the self-check summary, even if the run stopped early.
+### 9.1 `--process research` (`main.run_research` / `modes.run_research`)
+Two fixed phases, like normal mode (see [ALGORITHMS.md](ALGORITHMS.md#normal-and-research-modes-modespy)):
+
+1. **Browse** for `--browse-minutes` (15) with `surfing.Surfer` and `ResearchSource`. The project's planned searches are run, results opened (never one already read), each page read top-down with the progressive reader (up to ~170 s, researchers read about half of a page's text), and links in the articles followed: links sharing words with the topic or the first page's headings are preferred. Notes are taken from **every** page read, links followed included (`on_page` / `on_view`). Failures are logged and the next search tried; after four in a row browsing ends early. Chrome is closed inside the phase.
+2. **Compose** the paper to fit about 85% of the writing phase (minus the time kept for saving and closing). Half the time the title is resized once typed (24–36 pt). Written to `outline.json` and `paper.md`.
+3. **Write** for `--write-minutes` (15), one section per turn (`WritingProject.write_next`). When there is time to spare the person scrolls up and reads over what is written between sections; a finished paper is read over until the end.
+4. **Finish.** The last 45 s: save (Save As if it never was) and close Writer (File > Close, the Close button, Ctrl+W, or Ctrl+Q when no other OpenOffice window is open; the Start Center that may come up is usually closed too). The self-check summary is printed, even if the run stopped early.
 
 ### 9.2 In the Session
 With `--process session --topic …`, the Markov session's activities change:

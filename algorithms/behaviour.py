@@ -265,6 +265,16 @@ class Human:
         self.use_device("mouse")
         self.hm.double_click_rect(rect)
 
+    def multi_click_rect(self, rect, n):
+        """Click n times in quick succession inside rect (3 = triple click)."""
+        self.use_device("mouse")
+        self.hm.multi_click_rect(rect, n)
+
+    def drag(self, start, end):
+        """Drag with the left button from start to end (x, y), e.g. to highlight text."""
+        self.use_device("mouse")
+        self.hm.drag(start, end)
+
     def click_field(self, rect, p_park=0.35):
         """
         Click into a text field. Sometimes the cursor is then moved a little aside
@@ -297,6 +307,12 @@ class Human:
         self.use_device("keyboard")
         human_typing.hotkey_like_human(*keys, rng=self.rng, timer=self.keys)
 
+    def hotkey_repeat(self, *keys, presses=1):
+        """Hold the modifiers and tap the last key `presses` times (Ctrl+Shift+Left x3)."""
+        self.use_device("keyboard")
+        *mods, key = keys
+        human_typing.chord_repeat_like_human(mods, key, presses, rng=self.rng, timer=self.keys)
+
     def type(self, text, mode=None, **kw):
         """Type with the learned typing model at this persona's speed / typo rate."""
         self.use_device("keyboard")
@@ -328,7 +344,7 @@ class Human:
         else:
             self.press("win")
         time.sleep(open_wait * self.rng.uniform(0.9, 1.3))
-        self.type_short(self.search_prefix(name))
+        self.type_short(self.search_prefix(name), focus_guard=False)   # Start hands over to Search
         time.sleep(search_wait * self.rng.uniform(0.9, 1.3))
         self.think("confirm")
         self.press("enter")
@@ -352,8 +368,8 @@ class Human:
             return
         button = None
         if not self.prefers_keyboard():
-            button = ui_elements.find_element(auto.ControlFromHandle(hwnd), "Maximize", "ButtonControl",
-                                              timeout=1, search_depth=4)
+            button = ui_elements.find_element(auto.ControlFromHandle(hwnd), "Maximi", "ButtonControl",
+                                              partial=True, timeout=1, search_depth=4)   # Maximize / Maximise
         if button is not None and ui_elements.is_visible(button):
             self.click_element(button)
         else:
@@ -361,10 +377,33 @@ class Human:
         time.sleep(0.6)
 
     def place_new_window(self, hwnd):
-        """A window just opened: this person maximises it (maximize_pref) or works in it as it is."""
-        if self.rng.random() < self.persona.maximize_pref:
+        """A window just opened: this person maximises it (maximize_pref) or works in it as it is -
+        unless it covers less than 60% of its screen (a small screen, or a window left small
+        last time): then everyone maximises it, or toolbars and pages would be cramped."""
+        if self.rng.random() < self.persona.maximize_pref or screen.window_screen_share(hwnd) < 0.6:
             self.think("glance")
             self.maximize_window(hwnd)
+
+    def run_command(self, command, wait=1.0):
+        """Start a program from the Run dialog (Win+R, type, Enter) - the fallback when Start
+        search doesn't find it (search disabled or still indexing). Programs started this way
+        are children of explorer.exe, like Start-menu launches. False if the dialog didn't open."""
+        self.hotkey("win", "r")
+        deadline = time.time() + 5
+        while time.time() < deadline:                # the Run dialog: a #32770 window in front
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            buf = ctypes.create_unicode_buffer(32)
+            ctypes.windll.user32.GetClassNameW(fg, buf, 32)
+            if buf.value == "#32770":
+                break
+            time.sleep(0.2)
+        else:
+            return False
+        time.sleep(wait * self.rng.uniform(0.5, 1.0))
+        self.select_all_and_type(command)
+        self.think("confirm")
+        self.press("enter")
+        return True
 
     def focus_address_bar(self):
         """Click Chrome's address bar or press Ctrl+L. Returns True if it has focus."""

@@ -90,18 +90,26 @@ VOCAB_INDEX = {c: i for i, c in enumerate(VOCAB)}
 PAD, OTHER = 0, 1
 
 
-def word_delete_start(buf, cur):
+WORD_DELETE_STYLES = ("windows", "openoffice")
+
+
+def word_delete_start(buf, cur, style="windows"):
     """
-    Where Ctrl+Backspace at caret `cur` deletes back to: one space right before the
-    caret (if any), then the letters/digits of the word before it - the behaviour of
-    Writer, Word, Notepad and browser text fields for plain words. Plans only use it where
-    that is exact (runs of whole words separated by single spaces).
+    Where Ctrl+Backspace at caret `cur` deletes back to, for plain words:
+    'windows'     one space right before the caret (if any), then the letters/digits of the
+                  word before it - Word, Notepad and browser text fields.
+    'openoffice'  the same, and then the spaces before that word too - OpenOffice Writer
+                  deletes back to the end of the previous word ('board rev|' -> 'board|').
+    Plans only use it where that is exact (keys.use_word_deletes' conditions).
     """
     i = cur
     if i > 0 and buf[i - 1] == " ":
         i -= 1
     while i > 0 and buf[i - 1].isalnum():
         i -= 1
+    if style == "openoffice":
+        while i > 0 and buf[i - 1] == " ":
+            i -= 1
     return i
 
 

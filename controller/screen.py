@@ -236,3 +236,28 @@ def nearest_on_screen(x, y, rects=None, margin=0):
         if best_d is None or d < best_d:
             best, best_d = (px, py), d
     return best
+
+
+def window_screen_share(hwnd):
+    """Share (0-1) of its monitor's work area that a window covers (1.0 if unknown)."""
+    user32 = ctypes.windll.user32
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.wintypes.DWORD), ("rcMonitor", ctypes.wintypes.RECT),
+                    ("rcWork", ctypes.wintypes.RECT), ("dwFlags", ctypes.wintypes.DWORD)]
+    try:
+        r = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return 1.0
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        mon = user32.MonitorFromWindow(hwnd, 2)          # MONITOR_DEFAULTTONEAREST
+        if not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            return 1.0
+        w = info.rcWork
+        work = max(1, (w.right - w.left) * (w.bottom - w.top))
+        ix = max(0, min(r.right, w.right) - max(r.left, w.left))
+        iy = max(0, min(r.bottom, w.bottom) - max(r.top, w.top))
+        return min(1.0, ix * iy / work)
+    except Exception:
+        return 1.0

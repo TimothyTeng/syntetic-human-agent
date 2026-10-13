@@ -29,12 +29,22 @@ it relies on was checked in Writer 4.1:
     paragraph after the table, since everything is written at the end
   * after a table or a page break the caret already sits in a fresh paragraph
 
+Formatting is done one of two ways, the way people mix them: switched on before the text is
+typed (Ctrl+B, then the words), or afterwards - the text is typed plain, then highlighted
+(select) and formatted (bold / italic / size apply to the selection), and the caret goes
+back to the end (deselect). render(doc, rng) picks the second way for some bold / italic
+runs (p_post) and always for a title with its own size. A run formatted afterwards leaves
+its formatting at the caret (typing on after bold text continues bold), which the
+renderer's state follows like after a toggle.
+
 Operations (Op.kind, args):
   style name | bullets on | bold on | italic on | size pt | reset_chars | align 'left'/'center'
   type text mode | enter | page_break | table rows cols | next_cell | exit_table
+  select n_words 'words'/'line' | deselect
   checkpoint block_index | save ['final']
 """
 
+import re
 from dataclasses import dataclass
 
 from .ir import Bullets, Caption, Heading, PageBreak, Paragraph, Subtitle, Table, Title
@@ -47,6 +57,17 @@ NEXT_STYLE = {"Default": "Default", BODY: BODY, "Title": "Subtitle", "Subtitle":
 # Alignment a style brings with it (the others are left-aligned)
 STYLE_ALIGN = {"Title": "center", "Subtitle": "center"}
 COMPOSE_MIN_WORDS = 12               # runs this long are typed as composed prose, shorter ones transcribed
+# Formatting afterwards (select, then format): runs of plain words only, so Ctrl+Shift+Left
+# once per word lands exactly on the run's start (punctuation is a word stop of its own)
+POST_WORDS = re.compile(r"[A-Za-z0-9]+(?: [A-Za-z0-9]+){0,4}")
+LINE_POINTS = 900                    # a paragraph fits on one line if chars x font size (pt) <= this
+BODY_PT = 12.0                       # Text body's own size
+
+
+def word_stops(text):
+    """How many Ctrl+Left presses go from the end of `text` to its start in Writer (words
+    and punctuation marks each count)."""
+    return len(re.findall(r"\w+|[^\w\s]", text))
 
 
 @dataclass(frozen=True)
@@ -91,9 +112,11 @@ class Renderer:
     """Turns blocks into operations while tracking what Writer's state at the caret will be,
     so that only the operations that change something are emitted."""
 
-    def __init__(self):
+    def __init__(self, rng=None, p_post=0.0):
         """Start state: the empty Default paragraph of a new document, plain text, no direct
-        formatting."""
+        formatting. rng / p_post: chance that an eligible bold / italic run is formatted after
+        it was typed (select, format, deselect) instead of before (no rng: never)."""
+        self.rng, self.p_post = rng, p_post
         self.ops = []
         self.style = START_STYLE
         self.bullets = False
@@ -178,12 +201,53 @@ class Renderer:
         if text:
             self.emit("type", text, mode or type_mode(text))
 
-    def runs(self, runs):
+    def runs(self, runs, size=None):
         """Type formatted runs, each with its own bold / italic (one type op per run, so the
-        typing model's corrections never cross a formatting boundary)."""
+        typing model's corrections never cross a formatting boundary). Some are typed plain
+        and formatted afterwards (post_unit). size: the paragraph's font size."""
+        typed = ""
         for r in runs:
-            self.set_char(r.bold, r.italic)
-            self.type(r.text)
+            unit = self.post_unit(r, typed, whole=len(runs) == 1, size=size)
+            if unit:
+                self.set_char()                      # typed plain first ...
+                self.type(r.text)
+                self.post_format(r.text, unit, bold=r.bold, italic=r.italic)    # ... then highlighted
+            else:
+                self.set_char(r.bold, r.italic)
+                self.type(r.text)
+            typed += r.text
+
+    def post_unit(self, run, before, whole, size=None):
+        """'line' / 'words' if this run is to be formatted after typing it, else None. Only
+        bold-or-italic runs typed from plain text: a whole short paragraph (one line, so it can
+        be selected as a line) or a run of up to five plain words that starts the paragraph or
+        follows a space (so selecting word by word lands on its start)."""
+        if self.rng is None or run.bold == run.italic or self.bold or self.italic:
+            return None
+        if self.rng.random() >= self.p_post:
+            return None
+        if whole and len(run.text) * (size or BODY_PT) <= LINE_POINTS:
+            return "line"
+        if POST_WORDS.fullmatch(run.text) and (not before or before.endswith(" ")):
+            return "words"
+        return None
+
+    def post_format(self, text, unit, bold=False, italic=False, size=None):
+        """Highlight what was just typed (the last words, or the whole line) and format it;
+        the caret then goes back to the end of the text, where the formatting carries on."""
+        n = len(text.split()) if unit == "words" else word_stops(text)
+        self.emit("select", n, unit)
+        if bold:
+            self.emit("bold", True)
+            self.bold = True
+        if italic:
+            self.emit("italic", True)
+            self.italic = True
+        if size is not None:
+            self.emit("size", size)
+            self.size = size
+        self.direct = True
+        self.emit("deselect")
 
     # --- blocks -------------------------------------------------------------------------------
 
@@ -224,16 +288,21 @@ class Renderer:
         self.new_paragraph()
         if isinstance(b, Paragraph):
             self.set_paragraph(BODY, b.align, b.size)
-            self.runs(b.runs)
+            self.runs(b.runs, b.size)
         else:
             self.set_paragraph(block_style(b))
             self.type(b.text, "transcribe")
+            if isinstance(b, Title) and b.size:  # the title gets its size once it is typed
+                self.post_format(b.text, "line", size=b.size)
 
 
-def render(doc):
+def render(doc, rng=None, p_post=0.4):
     """List of Op for the whole document, with a checkpoint after every block (where a
-    writing session may stop and later resume) and a save before each new section."""
-    r = Renderer()
+    writing session may stop and later resume) and a save before each new section.
+    rng: formats some runs after typing them (p_post of the eligible ones, see
+    Renderer.post_unit); without it everything is formatted before typing. The same rng
+    seed gives the same operations (resuming relies on that)."""
+    r = Renderer(rng, p_post if rng is not None else 0.0)
     for i, b in enumerate(doc.blocks):
         r.block(i, b, first_of_section=isinstance(b, Heading) and b.level == 1)
         r.emit("checkpoint", i)

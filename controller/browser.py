@@ -13,6 +13,7 @@ or minimized - bring Chrome to the front (focus_chrome()) before find_links().
 """
 
 import ctypes
+import functools
 import re
 import time
 
@@ -141,6 +142,25 @@ def maximize_chrome():
 
 PROFILE_BUTTON_RE = re.compile(r"^Open (.+) profile$")
 CARD_HEADER_PX = 60   # top strip of a card holds the (renameable) profile name - avoid clicking it
+CARD_MIN_PX = 110     # in another Chrome language the cards are found by size: buttons at least this big
+
+
+def _profile_cards(picker):
+    """(button, profile name) of every card on the picker. English Chrome names them
+    'Open <name> profile'; in other languages the cards are the big buttons, named after the
+    profile in the local wording."""
+    named, big = [], []
+    for ctrl, _ in auto.WalkControl(picker, maxDepth=40):
+        if ctrl.ControlType != auto.ControlType.ButtonControl:
+            continue
+        m = PROFILE_BUTTON_RE.match(ctrl.Name or "")
+        if m:
+            named.append((ctrl, m.group(1)))
+            continue
+        l, t, r, b = ui_elements.element_rect(ctrl)
+        if r - l >= CARD_MIN_PX and b - t >= CARD_MIN_PX:
+            big.append((ctrl, ctrl.Name or ""))
+    return named or big
 
 
 def get_profile_picker(timeout=0):
@@ -157,7 +177,8 @@ def get_profile_picker(timeout=0):
             except Exception:
                 continue
             _request_web_accessibility(w)
-            if auto.ButtonControl(searchFromControl=w, RegexName=PROFILE_BUTTON_RE.pattern).Exists(0.5):
+            if auto.ButtonControl(searchFromControl=w, RegexName=PROFILE_BUTTON_RE.pattern).Exists(0.5) \
+                    or _profile_cards(w):
                 return w
         if time.time() >= deadline:
             return None
@@ -179,18 +200,13 @@ def list_profiles(timeout=5):
     if picker is None:
         return []
     profiles = []
-    for ctrl, _ in auto.WalkControl(picker, maxDepth=40):
-        if ctrl.ControlType != auto.ControlType.ButtonControl:
-            continue
-        m = PROFILE_BUTTON_RE.match(ctrl.Name or "")
-        if not m:
-            continue
+    for ctrl, name in _profile_cards(picker):
         rect = ui_elements.element_rect(ctrl)
         texts = [c.Name for c, _ in auto.WalkControl(ctrl, maxDepth=4)
                  if c.ControlType == auto.ControlType.TextControl and c.Name]
         click_rect = (rect[0], min(rect[1] + CARD_HEADER_PX, rect[3] - 10), rect[2], rect[3])
         profiles.append({
-            "name": m.group(1),
+            "name": name,
             "account": texts[0] if texts else None,
             "rect": rect,
             "click_rect": click_rect,
@@ -265,13 +281,42 @@ def navigate_to(url, type_interval=0.0):
     keyboard.press_key("enter")
 
 
+ADDRESS_BAR_NAME = "Address and search bar"      # English Chrome
+
+
+def address_bar(win, timeout=2):
+    """Chrome's address bar (EditControl) in `win`, or None. Found by its English name, else -
+    in any language - as the edit field in the window's top strip, outside the web page."""
+    hwnd = win.NativeWindowHandle
+    if hwnd not in _UNNAMED_BAR:               # English Chrome: by name
+        bar = ui_elements.find_element(win, ADDRESS_BAR_NAME, control_type="EditControl", timeout=timeout)
+        if bar is not None:
+            return bar
+    cached = _UNNAMED_BAR.get(hwnd)
+    try:
+        if cached is not None and cached.Exists(0, 0):
+            return cached
+        top = win.BoundingRectangle.top
+        for ctrl, _ in auto.WalkControl(win, maxDepth=14):   # the toolbar comes before the page
+            if ctrl.ControlType == auto.ControlType.EditControl:
+                rect = ui_elements.element_rect(ctrl)
+                if rect[1] - top < 160 and rect[2] - rect[0] > 200:
+                    _UNNAMED_BAR[hwnd] = ctrl
+                    return ctrl
+    except Exception:
+        pass
+    return None
+
+
+_UNNAMED_BAR = {}                              # window -> its address bar, where it isn't named in English
+
+
 def get_current_url():
     """Read the text currently in Chrome's address bar ('' if not found)."""
     win = get_chrome_window()
     if not win:
         return ""
-    bar = ui_elements.find_element(win, "Address and search bar",
-                                   control_type="EditControl", timeout=2)
+    bar = address_bar(win)
     if not bar:
         return ""
     try:
@@ -296,11 +341,21 @@ def wait_for_page_load(title_hint=None, timeout=config.DEFAULT_TIMEOUT):
     """
     deadline = time.time() + timeout
     win = get_chrome_window()
+    english = None                            # whether the Reload / Stop button goes by its English name
     while time.time() < deadline:
-        title_ok = title_hint is None or title_hint.lower() in apps.get_active_window_title().lower()
-        reload_btn = win and auto.ButtonControl(searchFromControl=win, Name="Reload").Exists(0)
-        if title_ok and reload_btn:
-            return True
+        try:
+            title_ok = title_hint is None or title_hint.lower() in apps.get_active_window_title().lower()
+            reload_btn = win and auto.ButtonControl(searchFromControl=win, Name="Reload").Exists(0)
+            if english is None and win:
+                english = bool(reload_btn) or auto.ButtonControl(searchFromControl=win, Name="Stop").Exists(0)
+            if title_ok and reload_btn:
+                return True
+            if title_ok and english is False and win:     # another language: loaded once the page has its title
+                doc = _get_page_document(win)
+                if doc is not None and doc.Name:
+                    return True
+        except Exception:     # COMError while a heavy page loads ("unable to invoke any of the subscribers")
+            pass
         time.sleep(config.POLL_INTERVAL)
     return False
 
@@ -327,8 +382,7 @@ def get_address_bar_rect(timeout=3):
     win = get_chrome_window()
     if not win:
         return None
-    bar = ui_elements.find_element(win, "Address and search bar",
-                                   control_type="EditControl", timeout=timeout)
+    bar = address_bar(win, timeout)
     return ui_elements.element_rect(bar) if bar else None
 
 
@@ -341,8 +395,7 @@ def address_bar_has_focus(timeout=1):
     fg = _foreground_chrome()
     if fg is None or not _is_browser_window(fg):
         return False
-    bar = ui_elements.find_element(fg, "Address and search bar",
-                                   control_type="EditControl", timeout=timeout)
+    bar = address_bar(fg, timeout)
     try:
         return bool(bar) and bool(bar.HasKeyboardFocus)
     except Exception:
@@ -367,7 +420,10 @@ def get_page_rect():
     if not win:
         return None
     doc = _get_page_document(win)
-    return ui_elements.element_rect(doc) if doc else None
+    try:
+        return ui_elements.element_rect(doc) if doc else None
+    except Exception:
+        return None
 
 
 # --- Tabs --------------------------------------------------------------------
@@ -448,16 +504,42 @@ def page_up():
     keyboard.press_key("pageup")
 
 
+def _tolerant(default):
+    """Page queries through UI Automation fail now and then while Chrome rebuilds a heavy
+    page's accessibility tree (COMError 'An event was unable to invoke any of the
+    subscribers', stale elements). Retry twice, then return `default` instead of stopping."""
+    def wrap(query):
+        @functools.wraps(query)
+        def wrapper(*args, **kw):
+            for attempt in range(3):
+                try:
+                    return query(*args, **kw)
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(0.3)
+            return default() if callable(default) else default
+        return wrapper
+    return wrap
+
+
 # --- Links -------------------------------------------------------------------
 
 def _get_page_document(win):
     """
     Return the DocumentControl holding the web page content.
     Chrome has several DocumentControls (most are hidden, 0x0 size), so pick
-    the largest visible one - that is the active tab's page.
+    the largest visible one - that is the active tab's page. None if there is none (or Chrome's
+    accessibility tree is busy - a heavy page still loading - three times running).
     """
-    docs = [d for d, _ in auto.WalkControl(win, maxDepth=14)
-            if d.ControlType == auto.ControlType.DocumentControl and ui_elements.is_visible(d)]
+    for attempt in range(3):
+        try:
+            docs = [d for d, _ in auto.WalkControl(win, maxDepth=14)
+                    if d.ControlType == auto.ControlType.DocumentControl and ui_elements.is_visible(d)]
+            break
+        except Exception:
+            time.sleep(0.4)
+    else:
+        return None
     if not docs:
         return None
     # Chrome wraps the page in an empty, unnamed DocumentControl of the same
@@ -490,35 +572,52 @@ def _request_web_accessibility(win):
         user32.SendMessageW(ctypes.c_void_p(hwnd), WM_GETOBJECT, 0, ctypes.c_ssize_t(OBJID_CLIENT))
 
 
-def find_links(visible_only=True, retries=3, retry_wait=0.5, max_depth=40):
+def link_href(ctrl):
+    """The URL a link points to, as Chrome reports it (its value), or '' if not reported."""
+    for get in (lambda: ctrl.GetValuePattern().Value, lambda: ctrl.GetLegacyIAccessiblePattern().Value):
+        try:
+            value = get()
+        except Exception:
+            continue
+        if value:
+            return str(value)
+    return ""
+
+
+def find_links(visible_only=True, retries=3, retry_wait=0.5, max_depth=40, with_href=False):
     """
     Return the links on the current page as a list of dicts:
         {'name': link text, 'rect': (left, top, right, bottom),
-         'center': (x, y), 'control': <uiautomation control>}
+         'center': (x, y), 'control': <uiautomation control>, 'href': URL or ''}
 
     visible_only: only links currently inside the viewport (clickable now).
+    with_href:    also ask each link for its URL (one more call per link; '' otherwise).
     """
     win = get_chrome_window()
     if not win:
         return []
     _request_web_accessibility(win)
     for _ in range(retries):
-        doc = _get_page_document(win)
-        root = doc if doc else win
-        view = ui_elements.element_rect(root)
         links = []
-        for ctrl in ui_elements.find_elements(root, "HyperlinkControl",
-                                              visible_only=visible_only, max_depth=max_depth):
-            rect = ui_elements.element_rect(ctrl)
-            # Extra viewport check: IsOffscreen isn't always reliable in Chrome
-            if visible_only and not _inside(rect, view):
-                continue
-            links.append({
-                "name": (ctrl.Name or "").strip(),
-                "rect": rect,
-                "center": ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2),
-                "control": ctrl,
-            })
+        try:
+            doc = _get_page_document(win)
+            root = doc if doc else win
+            view = ui_elements.element_rect(root)
+            for ctrl in ui_elements.find_elements(root, "HyperlinkControl",
+                                                  visible_only=visible_only, max_depth=max_depth):
+                rect = ui_elements.element_rect(ctrl)
+                # Extra viewport check: IsOffscreen isn't always reliable in Chrome
+                if visible_only and not _inside(rect, view):
+                    continue
+                links.append({
+                    "name": (ctrl.Name or "").strip(),
+                    "rect": rect,
+                    "center": ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2),
+                    "control": ctrl,
+                    "href": link_href(ctrl) if with_href else "",
+                })
+        except Exception:     # the page changed or the tree is busy - try again
+            links = []
         if links:
             return links
         time.sleep(retry_wait)  # tree may still be building - try again
@@ -531,6 +630,7 @@ def _inside(rect, view):
     return view[0] <= cx <= view[2] and view[1] <= cy <= view[3]
 
 
+@_tolerant(None)
 def find_link(text, exact=False, visible_only=True):
     """
     Find the first link whose text matches `text` (case-insensitive).
@@ -572,6 +672,7 @@ def scroll_until_link_visible(text, exact=False, step=-3, max_scrolls=15, pause=
 
 # --- Page text ---------------------------------------------------------------
 
+@_tolerant(None)
 def page_document(win=None):
     """The current page's DocumentControl (accessibility requested first), or None.
     Chrome must be in the foreground, as for find_links()."""
@@ -582,6 +683,7 @@ def page_document(win=None):
     return _get_page_document(win)
 
 
+@_tolerant("")
 def page_text(max_chars=400_000):
     """The WHOLE current page's text ('' if the page doesn't expose it). Block elements
     are separated by line breaks."""
@@ -593,6 +695,7 @@ def page_text(max_chars=400_000):
         return ""
 
 
+@_tolerant(lambda: (None, []))
 def page_text_nodes(area=None, min_words=3):
     """
     Visible text elements of the current page: (pattern, nodes), where nodes =
@@ -610,6 +713,7 @@ def page_text_nodes(area=None, min_words=3):
     return ui_elements.text_pattern(doc), ui_elements.text_nodes(doc, area, min_words)
 
 
+@_tolerant(0)
 def page_total_words(max_chars=400_000):
     """Words in the WHOLE current page (not just what is in view), from its text
     interface; 0 if the page doesn't expose its text."""
@@ -623,6 +727,7 @@ def page_total_words(max_chars=400_000):
         return 0
 
 
+@_tolerant(None)
 def page_view_signature(n=5):
     """
     Positions of the first few visible text elements of the page - changes whenever
@@ -635,12 +740,14 @@ def page_view_signature(n=5):
     return tuple((n_["text"][:20], n_["rect"][1]) for n_ in nodes[:n])
 
 
+@_tolerant(0)
 def page_word_count():
     """Number of words in the page's currently visible text (0 if none found)."""
     _, nodes = page_text_nodes(min_words=1)
     return sum(len(n["text"].split()) for n in nodes)
 
 
+@_tolerant(None)
 def page_scroll_state():
     """
     (scroll position %, visible part of the page %) of the current page, e.g.
@@ -661,6 +768,7 @@ def page_scroll_state():
     return None
 
 
+@_tolerant(False)
 def page_has_keyboard_focus():
     """
     True if keys would go to the page itself (Chrome in front, focus on the page and

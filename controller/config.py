@@ -52,7 +52,10 @@ pyautogui.PAUSE = 0
 START_MENU_OPEN_WAIT = 0.8     # after pressing the Windows key
 START_MENU_SEARCH_WAIT = 1.0   # after typing the app name, before Enter
 DIALOG_OPEN_WAIT = 1.0         # after triggering Save As / Open dialogs
-DEFAULT_TIMEOUT = 15           # generic timeout for waiting on windows/elements
+# Slow machines (small VMs) can stretch every wait: set AGENT_TIMEOUT_SCALE=2 for twice as long
+TIMEOUT_SCALE = max(0.5, float(os.environ.get("AGENT_TIMEOUT_SCALE", "1") or 1))
+DEFAULT_TIMEOUT = 20 * TIMEOUT_SCALE   # generic timeout for waiting on windows/elements
+APP_START_TIMEOUT = 45 * TIMEOUT_SCALE  # a program's first start (Writer on a cold machine is slow)
 POLL_INTERVAL = 0.25           # how often wait_* functions re-check
 
 # --- Paths ------------------------------------------------------------------

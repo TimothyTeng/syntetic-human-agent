@@ -19,11 +19,17 @@ What Writer (Apache OpenOffice 4.1, IAccessible2 seen through UIA's MSAA proxy) 
     clicked again.
   * toggle buttons (Bold, Italic, Centred, Bullets On/Off) do NOT report whether they are
     on - their states never change - so bold / italic / alignment can't be read back.
+  * all of this needs OpenOffice's accessibility bridge (UAccCOM.dll registered, "support
+    assistive technology tools" on). Where it isn't working the window shows UIA only its
+    title bar. Such a window is marked (mark_inaccessible): lookups then return None at once
+    and focus_kind() reports 'document' whenever that Writer window is in front, so the
+    executor can still work by keyboard, without read-back checks.
 
     caret_paragraph_style(win)    'Heading 1', 'Text body', ... of the paragraph with the caret
     caret_font_size(win)          12.0, ... at the caret (None if unknown)
     caret_in_table(doc)           whether the caret is inside a table
     caret_paragraph_text(doc)     text of the paragraph with the caret
+    end_paragraph_rect(doc)       where the paragraph being written is on screen
     document_text(doc)            the visible text (paragraphs end in '\\r', cells in '\\x07')
     normalise(text)               text with AutoCorrect's typing changes undone, for comparisons
     toolbar_button / style_box / font_size_box / menu / menu_item / find_dialog
@@ -43,6 +49,34 @@ DIALOG_CLASS = "SALSUBFRAME"                  # OpenOffice dialogs (Insert Table
 TITLE_SUFFIX = "OpenOffice Writer"            # "Untitled 1 - OpenOffice Writer", "paper.odt - OpenOffice Writer"
 
 STATE_PRESSED, STATE_FOCUSED, STATE_CHECKED = 0x8, 0x4, 0x10       # MSAA state bits
+_INACCESSIBLE = set()                         # Writer windows whose contents UIA can't see
+
+
+def mark_inaccessible(hwnd):
+    """Remember that this Writer window exposes nothing but its title bar to UIA."""
+    _INACCESSIBLE.add(hwnd)
+
+
+def is_inaccessible(win):
+    """True for a window marked by mark_inaccessible (win: control or handle)."""
+    try:
+        return (win if isinstance(win, int) else win.NativeWindowHandle) in _INACCESSIBLE
+    except Exception:
+        return False
+
+
+def request_accessibility(hwnd):
+    """Ask the window for its accessible object (WM_GETOBJECT), which is how OpenOffice notices
+    an accessibility client and starts its bridge. Returns True if it answered."""
+    WM_GETOBJECT, OBJID_CLIENT = 0x003D, -4
+    result = ctypes.c_size_t()
+    try:
+        ok = ctypes.windll.user32.SendMessageTimeoutW(ctypes.c_void_p(hwnd), WM_GETOBJECT, 0,
+                                                      ctypes.c_ssize_t(OBJID_CLIENT), 0x2, 3000,
+                                                      ctypes.byref(result))
+        return bool(ok and result.value)
+    except Exception:
+        return False
 
 
 def _tolerant(find):
@@ -93,6 +127,8 @@ def writer_windows():
 def document_control(win, timeout=5):
     """The editing surface (DocumentControl) of a Writer window, or None. Re-find it after a
     save: the element is replaced when the document gets its file name."""
+    if is_inaccessible(win):
+        return None
     for attempt in range(3):                  # tree walks fail now and then while Writer redraws
         try:
             doc = auto.DocumentControl(searchFromControl=win, searchDepth=6)
@@ -172,10 +208,13 @@ def focus_kind(win, doc=None):
     caret's paragraph isn't marked yet) or 'elsewhere' (another window, or one of Writer's
     dialogs, is in front)."""
     try:
-        if apps.foreground_top_level() != win.NativeWindowHandle:
-            return "elsewhere"
+        hwnd = win.NativeWindowHandle
+        if apps.foreground_top_level() != hwnd or not is_writer_window(hwnd):
+            return "elsewhere"                # (closing the last document turns its window into the Start Center)
     except Exception:
         return "elsewhere"
+    if is_inaccessible(win):                  # nothing to look at: Writer in front is all we can know
+        return "document"
     if _focused_box(win) is not None:
         return "field"
     doc = doc or document_control(win, timeout=1)
@@ -212,6 +251,21 @@ def caret_paragraph_text(doc, assume_end=False):
         if paras and paras[-1][1] is None:
             return _value(paras[-1][0])
     return None
+
+
+@_tolerant
+def end_paragraph_rect(doc):
+    """Screen rect (left, top, right, bottom) of the paragraph being written - the one with
+    the caret, else the last one on screen (writing happens at the end) - or None. The rect
+    spans the text column's width, whatever the text's length or alignment."""
+    para, _ = _caret_paragraph(doc) or (None, None)
+    if para is None:
+        paras = _paragraphs(doc)
+        if not paras or paras[-1][1] is not None:          # nothing on screen, or the end is a table
+            return None
+        para = paras[-1][0]
+    rect = ui_elements.element_rect(para)
+    return rect if rect[2] - rect[0] > 20 and rect[3] - rect[1] > 4 else None
 
 
 @_tolerant
@@ -260,6 +314,8 @@ def pending_completion(doc, typed):
 @_tolerant
 def formatting_toolbar(win):
     """The Formatting toolbar (Apply Style, Font Size, Bold, ...), or None if it's hidden."""
+    if is_inaccessible(win):
+        return None
     bar = auto.ToolBarControl(searchFromControl=win, Name="Formatting", searchDepth=4)
     return bar if bar.Exists(0.5, 0.1) and ui_elements.is_visible(bar) else None
 
@@ -270,6 +326,8 @@ def toolbar_button(win, name, toolbar="Formatting", timeout=1):
     'Save' on Standard), or None. name may be a regex ('^Cent(red|ered)$') - the labels
     follow the UI language (en-GB 'Centred', en-US 'Centered'). Searched within the
     toolbar so the sidebar's copies of the same buttons aren't picked."""
+    if is_inaccessible(win):
+        return None
     bar = auto.ToolBarControl(searchFromControl=win, Name=toolbar, searchDepth=4)
     if not bar.Exists(timeout, 0.1):
         return None
@@ -322,6 +380,8 @@ def caret_font_size(win):
 @_tolerant
 def menu(win, name):
     """A menu on the menu bar ('Insert', 'Format', 'Table'), or None."""
+    if is_inaccessible(win):
+        return None
     item = auto.MenuItemControl(searchFromControl=win, Name=name, searchDepth=3)
     return item if item.Exists(0.5, 0.1) and ui_elements.is_visible(item) else None
 
@@ -360,7 +420,63 @@ def find_dialog(title, timeout=3):
 def dialog_control(dialog, name, control_type="EditControl"):
     """A control of a dialog by name ('Columns', 'Rows', 'Heading', 'Page break'), or None."""
     ctrl = getattr(auto, control_type)(searchFromControl=dialog, RegexName=name, searchDepth=4)
-    return ctrl if ctrl.Exists(0.5, 0.1) else None
+    return in_screen_pixels(dialog, ctrl) if ctrl.Exists(0.5, 0.1) else None
+
+
+class _Rect:
+    def __init__(self, left, top, right, bottom):
+        self.left, self.top, self.right, self.bottom = left, top, right, bottom
+
+    def width(self):
+        return self.right - self.left
+
+    def height(self):
+        return self.bottom - self.top
+
+
+class _ScaledControl:
+    """A control whose BoundingRectangle is reported in unscaled (96 dpi) coordinates; it
+    answers with screen pixels and passes everything else through."""
+
+    def __init__(self, ctrl, factor):
+        self._ctrl, self._factor = ctrl, factor
+
+    @property
+    def BoundingRectangle(self):
+        r, f = self._ctrl.BoundingRectangle, self._factor
+        return _Rect(round(r.left * f), round(r.top * f), round(r.right * f), round(r.bottom * f))
+
+    def __getattr__(self, name):
+        return getattr(self._ctrl, name)
+
+
+def _monitor_scale(hwnd):
+    """Display scaling of the monitor a window is on (1.5 at 150%)."""
+    try:
+        monitor = ctypes.windll.user32.MonitorFromWindow(hwnd, 2)        # MONITOR_DEFAULTTONEAREST
+        x, y = ctypes.c_uint(), ctypes.c_uint()
+        ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(x), ctypes.byref(y))
+        return x.value / 96.0
+    except Exception:
+        return ctypes.windll.user32.GetDpiForSystem() / 96.0
+
+
+def in_screen_pixels(window, ctrl):
+    """`ctrl` itself, or - when OpenOffice reports its position at 100% scaling although the
+    display is scaled (its small message boxes do: 'Are you sure...?', 'Save changes?') - a
+    wrapper giving its real screen position. Detected by the control lying outside its window."""
+    try:
+        w, r = window.BoundingRectangle, ctrl.BoundingRectangle
+        inside = lambda x, y: w.left <= x <= w.right and w.top <= y <= w.bottom      # noqa: E731
+        cx, cy = (r.left + r.right) / 2, (r.top + r.bottom) / 2
+        if inside(cx, cy) or r.right <= r.left:
+            return ctrl
+        f = _monitor_scale(window.NativeWindowHandle)
+        if f > 1.01 and inside(cx * f, cy * f):
+            return _ScaledControl(ctrl, f)
+    except Exception:
+        pass
+    return ctrl
 
 
 def is_focused(ctrl):

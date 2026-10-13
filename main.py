@@ -5,7 +5,7 @@ Chrome demo (--process search, default):
   1. Open Chrome (Start menu: Win key or the Start button); if the "Who's using
      Chrome?" picker appears, move to the chosen profile and click it; maximise
   2. Focus the address bar: click it with a learned trajectory, or Ctrl+L
-  3. Type a search query and press Enter
+  3. Type the search address of an allowed site (--site) with the query, Enter
   4. Click a search result
   5. "Read" the page: scroll bursts, pauses, small mouse drifts and now and then
      following a line of text with the cursor
@@ -17,15 +17,25 @@ click into the page and type a paragraph with the learned typing model (typos +
 corrections, thinking pauses, changes of wording, arrowing back to fix things), then
 check the text. (--process word is still accepted for it.)
 
-Research (--process research --topic "..."): a researcher at work. Searches the topic
-(Wikipedia, Britannica, then the topic with the main headings of the first page), takes
-notes from every page it reads (page text through UI Automation, which part was in view),
-then writes a research paper into OpenOffice Writer from those notes - title, abstract,
-headings, paragraphs with citations, bold / italic, font sizes, tables, bullets,
-references - typed and formatted with shortcuts or the toolbar and menus, section by
-section, saving as it goes and now and then going back to a source. Everything is kept in
-runs/research/<topic>-<time>/ (notes, page captures, the composed paper as paper.md, the
-.odt); --resume DIR carries on.
+Normal (--process normal): the 30-minute office worker. 15 minutes of browsing
+(--browse-minutes): about --target-sites websites, one after another, each for a while - the
+page typed into the address bar read top-down at the person's reading pace (re-reading now
+and then), then links around the site, a search of it (a news article, a course), other
+results, back - and Chrome is closed. Then 15 minutes of writing (--write-minutes): a generated
+office document (status report, meeting notes, proposal or memo) of exactly
+--target-sentences sentences with a title, headings and varied sentences, formatted with
+shortcuts or by highlighting text and using the toolbar, saved under its title in
+runs/normal/ and Writer closed.
+
+Research (--process research --topic "..."): the same two phases for a researcher. Searches
+the topic on the allowed sites' own search pages (AP News, Coursera, then AP News for the
+topic with the main headings of the first page),
+reads the results and follows links in the articles, taking notes from every page it reads
+(page text through UI Automation, which part was in view); then writes a research paper into
+OpenOffice Writer from those notes - title, abstract, headings, paragraphs with citations,
+bold / italic, font sizes, tables, bullets, references - section by section, saving as it
+goes, and closes Writer at the end. Everything is kept in runs/research/<topic>-<time>/
+(notes, page captures, the composed paper as paper.md, the .odt); --resume DIR carries on.
 
 Compose (--process compose --notes DIR): no UI at all - writes the paper from saved notes
 (a research folder, or a folder of page captures such as tests/fixtures/pages) and prints
@@ -45,14 +55,17 @@ how long they think and how fast they read. Override single traits with --wpm,
 Usage:
     python main.py                      # uses models/mouse_mdn.npz if present
     python main.py --no-model           # force the fallback generator
-    python main.py --query "wikipedia" --read-seconds 20 --seed 42
+    python main.py --query "climate change" --site apnews.com --read-seconds 20 --seed 42
     python main.py --profile Work --profile-index 1   # 2nd profile matching "Work"
     python main.py --list-profiles                    # print the picker's profiles and exit
     python main.py --process writer                   # type a paragraph into OpenOffice Writer
     python main.py --process writer --wpm 80          # ... as an 80 wpm typist
     python main.py --process writer --wpm 55 --text-file notes.txt --revisions llm
     python main.py --process session --minutes 15 --seed 7
-    python main.py --process research --topic "Apollo program" --minutes 45
+    python main.py --process normal                   # 15 min browsing + 15 min writing
+    python main.py --process normal --target-sites 10 --target-sentences 30 --sites-file my_sites.txt
+    python main.py --process normal --browse-minutes 2 --write-minutes 2 --target-sites 2 --target-sentences 5
+    python main.py --process research --topic "Apollo program"
     python main.py --process research --resume runs/research/apollo-program-20261001-1030
     python main.py --process session --topic "Apollo program"   # session browsing/writing does the research
     python main.py --process compose --notes tests/fixtures/pages --topic "Apollo program" --dry-run
@@ -70,6 +83,8 @@ import time
 from algorithms.behaviour import Human
 from algorithms.session import Session, TaskError
 from controller import browser
+import modes
+import sites
 from tasks import (WRITER_PARAGRAPH, Workspace, click_into_document, describe_profiles, log, open_browser,
                    open_writer_document, search_and_read, session_activities, type_into_document)
 
@@ -89,7 +104,7 @@ def make_human(args):
 
 def run_search_demo(human, args):
     open_browser(human, args.profile, args.profile_index)
-    search_and_read(human, args.query, args.read_seconds, link_hint=args.link_hint or args.query)
+    search_and_read(human, args.query, args.read_seconds, link_hint=args.link_hint, site=args.site)
     log("Demo finished.")
 
 
@@ -129,66 +144,21 @@ def make_project(human, args):
 
 
 def run_research(human, args):
-    """Read sources (up to 35-45% of the time), compose the paper to fit the time left, then
-    write it section by section, sometimes going back to a source in between."""
+    """Browse the topic for --browse-minutes (notes from every page), then write the paper
+    for --write-minutes (modes.run_research)."""
     proj = make_project(human, args)
     if proj is None:
         sys.exit("--process research needs --topic (or --resume DIR)")
-    ws = Workspace(human, args.profile, args.profile_index, args.revisions, research=proj)
     try:
-        research_flow(human, args, proj, ws)
+        modes.run_research(human, args, proj)
     finally:                                  # the self-checks, also when the run stopped early
         for line in proj.diag.summary():
             log(line)
 
 
-def research_flow(human, args, proj, ws):
-    """
-    The research run itself (run_research adds the end-of-run self-check summary):
-      1. read: search and take notes until --sources pages are read or the reading share of
-         the time is used up (a failed search is logged and the next query tried)
-      2. compose the paper to fit ~85% of the time left
-      3. write it one section per turn; between sections now and then go back to the
-         browser to re-read a bit of a source; stop when the next block wouldn't fit
-      4. out of time: save what is written, as a person would before leaving it
-    """
-    total = args.minutes * 60
-    end = time.monotonic() + total
-    left = lambda: end - time.monotonic()  # noqa: E731
-    failures = 0
-    reading_share = 0.35 if total < 45 * 60 else 0.45     # short runs: keep enough time to write
-    # 1. read (skipped when resuming a project whose paper is already composed)
-    while proj.paper is None and proj.needs_sources() and left() > (1 - reading_share) * total and failures < 3:
-        try:
-            ws.browse(left())
-            failures = 0
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as exc:              # TaskError, or an unexpected UI / COM error
-            if type(exc).__name__ == "FailSafeException":
-                raise                         # the emergency stop (mouse in a corner) always wins
-            failures += 1
-            log(f"Search didn't work out ({type(exc).__name__}: {exc}) - trying the next one")
-    if not proj.has_material():
-        raise TaskError("Not enough was read to write a paper")
-    # 2. compose (kept as is when resuming)
-    proj.compose(target_words=args.words, seconds=left() * 0.85)
-    # 3. write, a section per turn
-    while not proj.finished and left() > 15:
-        before = proj.op_index
-        ws.write(left())
-        if proj.op_index == before:                # the next block wouldn't finish in time
-            log("Not enough time left for the next part of the paper")
-            break
-        if not proj.finished and left() > 90 and human.rng.random() < 0.3:
-            ws.glance_at_source(float(human.rng.uniform(8, 25)))   # "let me check that in the source"
-    # 4. stopped early: save the paper so far (finished papers were saved by their last step)
-    if not proj.finished and proj.saved and ws.writer_win is not None and ws.back_to(ws.writer_win.NativeWindowHandle):
-        log("Out of time - saving the paper so far")          # a person saves before leaving it
-        human.think("glance")
-        human.hotkey("ctrl", "s")
-        time.sleep(1.0)
-    log(f"Research {'finished' if proj.finished else 'stopped (out of time)'} - files in {proj.folder}")
+def run_normal(human, args):
+    """Browse for --browse-minutes, then write a generated document for --write-minutes."""
+    modes.run_normal(human, args)
 
 
 def run_compose(args):
@@ -216,9 +186,10 @@ def run_compose(args):
     if not topic:
         sys.exit("Give the topic with --topic")
     cfg = ComposeConfig(target_words=args.words or 800, paraphrase=args.paraphrase)
-    doc = compose_paper(notes, topic, np.random.default_rng(args.seed), cfg)
+    rng = np.random.default_rng(args.seed)
+    doc = compose_paper(notes, topic, rng, cfg)
     print(ir.to_markdown(doc))
-    ops = render(doc)
+    ops = render(doc, rng)                # some formatting done after typing (select, format, deselect)
     print(f"\n<!-- {doc.word_count()} words, {len(doc.blocks)} blocks, {len(ops)} editing steps -->")
     if args.dry_run:                     # a sampled persona "performs" the steps; actions are listed, not done
         human = Human(seed=args.seed, use_model=False, fatigue=False, shortcut_pref=args.shortcut_pref)
@@ -233,13 +204,22 @@ def run_compose(args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--process", default="search",
-                    choices=["search", "writer", "word", "session", "research", "compose"],
+                    choices=["search", "writer", "word", "session", "normal", "research", "compose"],
                     help="search = Chrome search demo, writer (or word) = type a paragraph into a new "
-                         "OpenOffice Writer document, session = browse + write for --minutes, research = read "
-                         "about --topic and write a paper in Writer, compose = write the paper from saved notes "
-                         "(no UI)")
+                         "OpenOffice Writer document, session = browse + write for --minutes, normal = browse "
+                         "the pre-selected sites then write a generated document, research = read about --topic "
+                         "then write a paper in Writer, compose = write the paper from saved notes (no UI)")
+    ap.add_argument("--browse-minutes", type=float, default=15, help="normal / research: length of the browsing phase")
+    ap.add_argument("--write-minutes", type=float, default=15, help="normal / research: length of the writing phase")
+    ap.add_argument("--target-sites", type=int, default=5,
+                    help="normal: websites to visit while browsing (each for a while: reading, following "
+                         "links around it, searching it)")
+    ap.add_argument("--target-sentences", type=int, default=35, help="normal: sentences the document has")
+    ap.add_argument("--sites-file", default=None,
+                    help="normal: pre-selected sites, one address per line (default: surfing.SITES)")
     ap.add_argument("--topic", default=None, help="research: what to research and write about")
-    ap.add_argument("--sources", type=int, default=4, help="research: how many pages to read before writing")
+    ap.add_argument("--sources", type=int, default=4,
+                    help="research: pages needed before a paper can be written (more are read while time allows)")
     ap.add_argument("--words", type=int, default=None,
                     help="research / compose: length of the paper (default: what fits the time left; compose 800)")
     ap.add_argument("--paraphrase", type=int, default=1, choices=[0, 1, 2],
@@ -255,8 +235,11 @@ def main(argv=None):
                     help="where changed wordings come from when composing")
     ap.add_argument("--pause-scale", type=float, default=None,
                     help="thinking-pause length while composing (persona default 0.7; 1.0 = timed-essay writers)")
-    ap.add_argument("--query", default="history of the internet wikipedia")
-    ap.add_argument("--link-hint", default="wikipedia", help="text the first clicked result should contain")
+    ap.add_argument("--query", default="electric vehicles")
+    ap.add_argument("--site", default="apnews.com", choices=sorted(sites.SITE_SEARCH),
+                    help="search demo: the allowed site whose own search page is used (no search engine is "
+                         "reachable on the event network)")
+    ap.add_argument("--link-hint", default=None, help="text the first clicked result should contain")
     ap.add_argument("--read-seconds", type=float, default=None,
                     help="seconds on the first result (default: from the page's length)")
     ap.add_argument("--no-model", action="store_true", help="use the fallback generator")
@@ -285,7 +268,7 @@ def main(argv=None):
         run_compose(args)
         return
     run = {"search": run_search_demo, "writer": run_writer_demo, "word": run_writer_demo, "session": run_session,
-           "research": run_research}[args.process]
+           "normal": run_normal, "research": run_research}[args.process]
     try:
         run(make_human(args), args)
     except TaskError as exc:

@@ -259,9 +259,28 @@ class HumanMouse:
 
     def double_click_rect(self, rect):
         """Move into rect and double-click (second click follows within ~0.1-0.2 s)."""
+        self.multi_click_rect(rect, 2)
+
+    def multi_click_rect(self, rect, n=2):
+        """Move into rect and click n times in quick succession (2 = double, 3 = triple click;
+        in a text editor: select a word / a sentence)."""
         self.move_to_rect(rect)
         self.press_release()
-        time.sleep(self.rng.uniform(0.06, 0.16))   # gap between the two clicks
+        for _ in range(n - 1):
+            time.sleep(self.rng.uniform(0.06, 0.16))   # gap between the clicks
+            mouse.mouse_down()
+            time.sleep(self.clicks.sample_hold(self.rng))
+            mouse.mouse_up()
+
+    def drag(self, start, end):
+        """Press the left button at `start`, move to `end` with it held, let go - e.g.
+        highlighting a line of text. The button is never left held."""
+        self.move_to(*start)
+        time.sleep(self.clicks.sample_dwell(self.rng))
         mouse.mouse_down()
-        time.sleep(self.clicks.sample_hold(self.rng))
-        mouse.mouse_up()
+        try:
+            time.sleep(float(0.12 * np.exp(self.rng.normal(0, 0.3))))     # settle before pulling
+            self.move_to(*end)
+            time.sleep(float(0.1 * np.exp(self.rng.normal(0, 0.3))))      # check the highlight
+        finally:
+            mouse.mouse_up()

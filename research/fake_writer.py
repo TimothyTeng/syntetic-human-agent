@@ -18,9 +18,16 @@ real Writer 4.1):
     asserted to happen only in an empty paragraph; bullets stay
   * a new table cell starts unformatted; Tab in a table's last cell adds a row;
     Ctrl+End leaves the table for the paragraph after it
+  * with text selected (select: the last n words of the paragraph, or all of it) bold /
+    italic / size apply to the selection - a toggle on a selection that already has the
+    formatting would remove it, asserted not to happen - and typing is asserted not to
+    happen (it would replace the selection); after deselect the caret is at the end with
+    the selection's formatting
 
     fw = FakeWriter(); fw.run(render(doc)); fw.result() == expected(doc)
 """
+
+import re
 
 from .ir import Bullets, Caption, Heading, PageBreak, Paragraph, Subtitle, Table, Title
 from .writer_ops import BODY, NEXT_STYLE, START_STYLE, block_style, style_align
@@ -40,6 +47,7 @@ class FakeWriter:
         self.size = None
         self.direct = False                       # direct character formatting at the caret
         self.outside = None                       # the caret's formatting outside the table
+        self.sel = None                           # selected characters at the end of the paragraph
 
     @staticmethod
     def _para(style, align=None, bullets=False):
@@ -69,20 +77,63 @@ class FakeWriter:
 
     def op_bold(self, op):
         """Ctrl+B: flip bold; op.a is the state the renderer expects afterwards."""
+        if self.sel:
+            self._format_selection(1, op.a)
         self.bold = not self.bold                 # Ctrl+B toggles
         self.direct = True                        # "not bold" is direct formatting too
         assert self.bold == op.a, "bold toggled into the wrong state"
 
     def op_italic(self, op):
         """Ctrl+I: flip italic; op.a is the state the renderer expects afterwards."""
+        if self.sel:
+            self._format_selection(2, op.a)
         self.italic = not self.italic
         self.direct = True
         assert self.italic == op.a, "italic toggled into the wrong state"
 
     def op_size(self, op):
-        """Font size for the text typed from here on."""
+        """Font size for the text typed from here on (and for the selection, if any)."""
+        if self.sel:
+            self._format_selection(3, op.a, toggle=False)
         self.size = op.a
         self.direct = True
+
+    def op_select(self, op):
+        """Select the end of the paragraph: its last op.a words ('words') or all of it ('line')."""
+        assert self.sel is None, "selecting while text is selected"
+        text = "".join(r[0] for r in self.cur["runs"])
+        assert text, "selecting in an empty paragraph"
+        if op.b == "line":
+            self.sel = len(text)
+        else:
+            starts = [m.start() for m in re.finditer(r"\S+", text)]
+            assert len(starts) >= op.a, "selecting more words than the paragraph has"
+            self.sel = len(text) - starts[-op.a]
+
+    def op_deselect(self, op):
+        """Back to the end of the paragraph; the caret keeps the selection's formatting."""
+        assert self.sel is not None, "deselect without a selection"
+        self.sel = None
+
+    def _format_selection(self, field, value, toggle=True):
+        """Set field (1 bold, 2 italic, 3 size) of the selected characters to value. A toggle
+        on a selection that already has it would switch it off instead."""
+        runs, keep, cut = self.cur["runs"], [], sum(len(r[0]) for r in self.cur["runs"]) - self.sel
+        pos = 0
+        for r in runs:                            # split the run the selection starts in
+            end = pos + len(r[0])
+            if pos < cut < end:
+                keep += [[r[0][:cut - pos], *r[1:]], [r[0][cut - pos:], *r[1:]]]
+            else:
+                keep.append(list(r))
+            pos = end
+        pos = 0
+        for r in keep:
+            if pos >= cut:
+                assert not (toggle and r[field] == value), "toggled formatting the selection already has"
+                r[field] = value
+            pos += len(r[0])
+        self.cur["runs"] = keep
 
     def op_reset_chars(self, op):
         """Ctrl+M: plain text in the style's own size - and the style's own alignment, which
@@ -222,5 +273,6 @@ def expected(doc):
             out.append(("p", BODY, b.align, _merge([[r.text, r.bold, r.italic, b.size] for r in b.runs])))
         elif isinstance(b, (Title, Subtitle, Heading, Caption)):
             style = block_style(b)
-            out.append(("p", style, style_align(style), ((b.text, False, False, None),)))
+            size = b.size if isinstance(b, Title) else None
+            out.append(("p", style, style_align(style), ((b.text, False, False, size),)))
     return out

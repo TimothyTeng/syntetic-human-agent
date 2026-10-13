@@ -993,11 +993,14 @@ def _shared_names(pool, k, topic):
     return out
 
 
+NEWS_SITE, COURSE_SITE = "apnews.com", "www.coursera.org"     # keys of sites.SITE_SEARCH
+
+
 def plan_queries(topic, notes=None):
-    """Searches a researcher would run: the topic on Wikipedia and Britannica, then the
-    topic plus the main headings of the first page read (fallback: generic facets).
-    [(query, link hint or None)]"""
-    queries = [(f"{topic} wikipedia", "wikipedia"), (f"{topic} britannica", "britannica")]
+    """Searches a researcher would run on the sites the network allows (sites.SITE_SEARCH):
+    the topic on AP News and on Coursera, then on AP News the topic plus the main headings of
+    the first page read (fallback: generic facets). [(query, site)]"""
+    queries = [(topic, NEWS_SITE), (topic, COURSE_SITE)]
     facets = []
     if notes and notes.sources:
         first = notes.sources[0]
@@ -1006,10 +1009,10 @@ def plan_queries(topic, notes=None):
                  and not MINOR_SECTIONS.match(s.heading)]
         heads.sort(key=lambda s: -s.words())
         facets = [s.heading.lower() for s in heads[:3]]
-    for f in facets + ["history", "significance", "facts"]:
+    for f in facets + ["history", "impact", "future"]:
         q = f"{topic} {f}"
         if q.lower() not in {x.lower() for x, _ in queries}:
-            queries.append((q, None))
+            queries.append((q, NEWS_SITE))
     return queries
 
 

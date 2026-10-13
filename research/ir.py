@@ -27,8 +27,11 @@ class Run:
 
 @dataclass
 class Title:
-    """The paper's title at the top of the first page (Writer's Title style)."""
+    """The paper's title at the top of the first page (Writer's Title style). size: a font
+    size the writer gives it afterwards (typed first, then selected and resized; None = the
+    style's own)."""
     text: str
+    size: float = None
 
 
 @dataclass

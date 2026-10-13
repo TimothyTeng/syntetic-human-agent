@@ -13,6 +13,7 @@ import unittest
 import numpy as np
 
 from research import ir
+import sites
 from research.compose import ComposeConfig, compose_paper, plan_queries
 from research.extract import clean_title, parse_capture, site_name
 from research.fake_writer import FakeWriter, expected
@@ -92,10 +93,12 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(again.to_dict(), notes.to_dict())
 
     def test_queries_follow_the_first_source(self):
-        """Wikipedia and Britannica are searched first, then the topic with the first source's headings."""
-        queries = [q for q, _ in plan_queries("Apollo program", fixture_notes())]
-        self.assertEqual(queries[:2], ["Apollo program wikipedia", "Apollo program britannica"])
-        self.assertTrue(any(q.endswith(("spacecraft", "missions", "legacy", "background")) for q in queries[2:]))
+        """The topic is searched on AP News and Coursera first, then with the first source's
+        headings - always on a site whose own search page works (no search engine)."""
+        planned = plan_queries("Apollo program", fixture_notes())
+        self.assertEqual(planned[:2], [("Apollo program", "apnews.com"), ("Apollo program", "www.coursera.org")])
+        self.assertTrue(any(q.endswith(("spacecraft", "missions", "legacy", "background")) for q, _ in planned[2:]))
+        self.assertTrue(all(site in sites.SITE_SEARCH for _, site in planned))
 
 
 class ComposeTest(unittest.TestCase):
