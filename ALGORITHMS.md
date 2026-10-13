@@ -1,6 +1,6 @@
 # Algorithms — Behaviour Layer Reference
 
-`controller/` knows **what** can be done: move to (x, y), click, type. `algorithms/` decides **how** a person would do it: the path the mouse takes, how fast, how long the button stays down, how someone scrolls while reading, and how they type (rhythm, typos, pauses, changes of mind). `main.py` runs two demos: a Chrome search and a Word document.
+`controller/` knows **what** can be done: move to (x, y), click, type. `algorithms/` decides **how** a person would do it: the path the mouse takes, how fast, how long the button stays down, how someone scrolls while reading, and how they type (rhythm, typos, pauses, changes of mind). `main.py` runs two demos: a Chrome search and an OpenOffice Writer document.
 
 Detailed guides for the two learned models (training process, design considerations, file-by-file function rundown, usage examples, results):
 - [`algorithms/mouse_model/README.md`](algorithms/mouse_model/README.md)
@@ -14,7 +14,7 @@ main.py ──► algorithms.HumanMouse ──► mouse_model (trained LSTM-MDN,
         ├─► algorithms.human_typing ► typing_model (planner + learned timing, typos, pauses)
         │                          ──► controller.keyboard (key_down / key_up timeline)
         ├─► controller.browser / apps / ui_elements (find targets on screen)
-        └─► controller.office (Word demo: open Word, blank document)
+        └─► controller.writer / apps (Writer demo: open OpenOffice Writer, blank document)
 ```
 
 ---
@@ -43,9 +43,9 @@ python -m algorithms.typing_model.evaluate --aalto data/aalto_keystrokes/Keystro
 
 # 5) run the demos (they work before training too, using fallbacks / built-in defaults)
 python main.py                                    # Chrome search demo
-python main.py --no-model --query "wikipedia" --read-seconds 20 --seed 42
-python main.py --process word                     # type a paragraph into a new Word document (80 wpm)
-python main.py --process word --wpm 55 --text-file notes.txt --pause-scale 0.4
+python main.py --no-model --query "climate change" --site apnews.com --read-seconds 20 --seed 42
+python main.py --process writer                   # type a paragraph into a new OpenOffice Writer document (80 wpm)
+python main.py --process writer --wpm 55 --text-file notes.txt --pause-scale 0.4
 ```
 
 Abort `main.py` at any time by slamming the mouse into a screen corner (the pyautogui fail-safe).
@@ -252,8 +252,10 @@ Deletion runs per 100 chars: real 3.3, generated 3.9. In-text revisions per 1,00
 ### `algorithms/reading.py`
 | Function | Description |
 |---|---|
-| `read_page(hm, duration, page_rect=None, params=ReadingParams())` | Moves the cursor into the text column, then alternates scroll bursts, log-normal reading pauses and small drifts. |
-| `scroll_burst(rng, params)` | 1–5 wheel notches in quick succession, mostly down. |
+| `read_article(hm, budget, page_rect, params, on_trace, human, on_view)` | The progressive reader. It reads the lead (a pause for the words in view at the persona's reading speed). Then it steps down 40–80% of a screen at a time (the wheel in one or two flicks; PgDn or arrows for keyboard people) and pauses for the words that **came into view** with each step. How much of them gets read follows a sticky engagement level: skim, read or close (close reading sometimes traces a line with the cursor). Now and then it scrolls back up to re-read, drifts, or rests on a link. Returns `ReadResult(reason, seconds, seen, steps, rereads)`: `finished` (bottom), `budget` (time spent) or `bored` (rare, after the lead). |
+| `step_notches`, `revealed_words`, `words_pause`, `next_engagement` | Its pure decisions (tested offline): step size, the words new in view (only text below the furthest point seen counts), the pause for them, the engagement drift. |
+| `read_page(hm, duration, ...)` | `read_article` under its older name. |
+| `scroll_burst(rng, params, direction, n)` | Wheel notches in quick succession (default count from the learned burst sizes). |
 | `reading_area(page_rect)` | The central text column of the page. |
 | `ReadingParams` | All reading probabilities and timings in one place. They are **hand-set placeholders**, to be tuned or learned later. |
 
@@ -263,6 +265,8 @@ Deletion runs per 100 chars: real 3.3, generated 3.9. In-text revisions per 1,00
 | `type_like_human(text, rng=None, wpm=45, sigma=0.35, mode=None, revisions="heuristic", allow_uncorrected=False, error_scale=1.0, revision_scale=1.0, pause_scale=0.7, max_pause=8.0, dry_run=False)` | Plans and types `text` into the focused window and returns the plan. `wpm` = speed persona; `sigma` scales timing variability (0.35 = typical); `mode` = `"transcribe"` / `"compose"` / auto; `revisions="llm"` asks Claude for first-draft wordings. `pause_scale=1.0` gives timed-essay thinking pauses, which feel slow for emails. |
 | `play(plan, rng)` / `build_timeline(plan, rng)` | Executes a plan, or builds its `key_down` / `key_up` event list. |
 | `get_model()` | The loaded `TypingModel` (cached). |
+
+Extra `TypingConfig` options can be passed to `type_like_human` as keywords. One of them is `word_safe=True`, which research mode uses for OpenOffice Writer: every typo is noticed and fixed **before its word ends**. There is no late notice, no typing on past a space or punctuation, and no typo that would itself include a separator. AutoCorrect (in Writer as in Word) rewrites a misspelled word as soon as a space follows it, and a later fix by the typing model would then edit text that is no longer what it typed. See [RESEARCH.md §12.2](RESEARCH.md#122-the-lost-letter-investigation).
 
 ### `algorithms/typing_model/`
 | Function / class | Description |
@@ -280,7 +284,7 @@ Deletion runs per 100 chars: real 3.3, generated 3.9. In-text revisions per 1,00
 | `fit_stats.main()` / `train.main()` / `evaluate.main()` / `selftest.run()` | CLI entry points; see Quick start. |
 
 ### `main.py`
-Two demos, chosen with `--process search` (default) or `--process word`.
+Two demos, chosen with `--process search` (default) or `--process writer`.
 
 **Chrome search demo:**
 1. Open Chrome from the Start menu. If the "Who's using Chrome?" picker appears, move to the chosen profile card with the learned mouse model and click it. Then maximize the browser.
@@ -297,26 +301,78 @@ Flags: `--query`, `--link-hint`, `--read-seconds`, `--no-model`, `--temperature`
 
 After typing the query, the demo reads the address bar back. If Chrome's inline autocomplete swallowed a Backspace, it retypes the query.
 
-**Word demo** (`--process word`):
-1. Note which Word windows are already open, then open Word from the Start menu and wait for a *new* Word window to come to the front, so the demo never types into a document that was already open. If that window shows the **Blank document** tile (the Start screen), click it with the learned mouse model and wait for the tile to disappear; Enter is the fallback. Window titles are not used to detect the Start screen: with another document open, it is already titled "Document2 - Word".
-2. Maximize that window, click near the top of the page, and press Ctrl+End. It stops if the document doesn't have keyboard focus.
+**Writer demo** (`--process writer`; `--process word` is still accepted):
+1. Note which OpenOffice Writer windows are already open, then open Writer from the Start menu ("openoffice writer") and wait for a *new* Writer window to come to the front, so the demo never types into a document that was already open. Writer opens straight into a blank "Untitled N" document; there is no Start screen. All OpenOffice windows share the class `SALFRAME`, so the title ("... - OpenOffice Writer") tells Writer apart from Calc or the Start Center.
+2. Maximize that window (persona preference), click near the top of the page, and press Ctrl+End. It stops if the document doesn't have keyboard focus.
 3. Type the paragraph in compose mode: typos and corrections, thinking pauses, changed wordings, arrowing back to fix things.
-4. Read the document text back through UI Automation (`TextPattern`) and report whether it matches. Curly quotes from AutoCorrect count as a match. The document is left open and unsaved.
+4. Read the document text back through UI Automation (the paragraphs on screen) and report whether it matches. AutoCorrect's curly quotes and dashes count as a match. The document is left open and unsaved.
 
 | Function | Description |
 |---|---|
-| `run_word_demo(hm, args)` | The steps above. |
-| `word_window_handles()` | Handles of every open Word window (class `OpusApp`). |
-| `foreground_word_window(timeout, ignore)` | The Word window in front, skipping the handles in `ignore`. |
-| `word_blank_document_tile(win, timeout)` | The "Blank document" tile if the window shows the Start screen, else None. |
-| `word_document(win, timeout)` | `(window, document control)`: the editing surface, a `DocumentControl` named after the document. |
-| `word_document_has_focus(doc)` | True if keyboard input would go into the document. |
-| `word_document_text(doc)` | The document's text (paragraphs end in `\r`), or None. |
-| `WORD_PARAGRAPH` | The built-in 153-word paragraph. |
+| `run_writer_demo(human, args)` | The steps above. |
+| `foreground_writer_window(timeout, ignore)` | The Writer window in front, skipping the handles in `ignore`. |
+| `writer_document(win, timeout)` | `(window, document control)`: the editing surface, a `DocumentControl` named after the document. |
+| `open_writer_document(human)` / `reopen_writer_document(human, path)` | A new blank document / a saved one opened with Ctrl+O. |
+| `click_into_document(human, win, doc)` / `type_into_document(human, doc, text)` | Focus the page (caret at the end) / type and check the text. |
+| `WRITER_PARAGRAPH` | The built-in 153-word paragraph. |
 
-Word flags: `--wpm` (default 80), `--text`, `--text-file`, `--revisions heuristic|llm`, `--pause-scale` (default 0.7), plus `--seed`, `--no-model` and `--temperature` for the mouse.
+Writer flags: `--wpm` (default 80), `--text`, `--text-file`, `--revisions heuristic|llm`, `--pause-scale` (default 0.7), plus `--seed`, `--no-model` and `--temperature` for the mouse.
 
-Measured run (80 wpm persona, 153 words): 271 s including thinking pauses (40 wpm effective); 1,222 keystrokes with 24 typos; the document text matched exactly.
+Measured run (in Word, before the move to Writer; 80 wpm persona, 153 words): 271 s including thinking pauses (40 wpm effective); 1,222 keystrokes with 24 typos; the document text matched exactly.
+
+### Normal and research modes (`modes.py`)
+The two 30-minute runs the brief asks for: a **browsing phase** then a **writing phase**, each `--browse-minutes` / `--write-minutes` long (15 + 15).
+
+```bash
+python main.py --process normal                                     # target 8 sites, 25 sentences
+python main.py --process normal --target-sites 10 --target-sentences 30 --sites-file my_sites.txt
+python main.py --process research --topic "Apollo program"
+python main.py --process normal --browse-minutes 2 --write-minutes 2 --target-sites 2 --target-sentences 5   # quick check
+```
+
+| Phase | Normal | Research |
+|---|---|---|
+| Browse (`surfing.Surfer`) | `SiteSource`: the pre-selected `surfing.SITES` (or `--sites-file`) typed into the address bar, about 60/40 with searches from `tasks.QUERIES`. Reading time per page = time left ÷ sites still to read (jittered), so about `--target-sites` pages get read. | `ResearchSource`: the project's searches. Reading time follows the page's length; notes from every page. |
+| After each page | `choose_move`: follow a link in the article (0.45), back to the previous article (0.15), another search result (0.25), something new (0.25). Link chains are at most 3 hops; links are filtered by `article_links` (text column, real words, no citations / edit / menu / file / talk pages, allowed sites where Chrome reports the address) and the address reached is checked after every click. | Same, with links sharing words with the topic preferred (`pick_link`). |
+| End of browsing | No new site in the last 45 s (the person reads on instead). The tabs it opened are closed, then Chrome (`tasks.close_browser`: Alt+F4, Ctrl+Shift+W or the Close button), within the phase. | Same. |
+| Write | `office_writing.OfficeProject`: a generated status report, meeting notes, proposal or memo with exactly `--target-sentences` sentences. | The paper composed from the notes to fit the phase. |
+| During writing | Section by section (`Workspace.write`). With time to spare: scroll up and read it over (`Workspace.review_document`), then Ctrl+End. If the next block won't fit, or the document is done early: read it over until the end. | Same. |
+| End of writing | The last 45 s: save (Save As `<title>.odt` if never saved), close Writer (`tasks.close_writer`). Leftover seconds pass without input, so each phase takes its full length. | Same (`<topic>.odt`). |
+
+**The generated document** (`office_writing.generate_office_doc`). One made-up piece of work (project, teams, metrics, objects), so sentences hang together. It has:
+- a title of at most 30 characters, resized after typing 60% of the time;
+- sometimes a date line;
+- 2–4 headed sections in a sensible order for the kind of document;
+- paragraphs of 2–5 sentences;
+- in action sections, often a bulleted list;
+- sometimes a one-line bold statement;
+- key phrases in bold and a guide's name in italic.
+
+Sentences come from 15 structures: simple, compound, fronted Although/Because/Once/If, passive, relative clause, a number that moved, question, request, opinion, list of three, expectation, concern, decision, benefit, modal. Each is filled from pools, with sections weighting the structures that suit them. No structure or first word repeats back to back, and no sentence is used twice. The output always passes `ir.validate`.
+
+**Formatting variety.** `writer_ops.render(doc, rng)` formats some runs *after* typing them. The text is highlighted (Ctrl+Shift+Left per word or Shift+Home; mouse people drag across or triple-click a line), then formatted with Ctrl+B / the toolbar's Bold, and sizes with Ctrl+] steps / the Font Size box. Other runs keep the toggle-then-type way. See [RESEARCH.md §7.2, §8.1](RESEARCH.md#72-rendering-writer_opsrender).
+
+### Research mode (`research/`, `--process research`)
+A researcher at work. It reads pages about `--topic`, keeps notes, and writes a formatted research paper in OpenOffice Writer from them. No language model is used: the machine has 4 GB of RAM and no access to online models, so the writing is extractive (real sentences from the pages read, chosen and arranged).
+
+**Full documentation: [RESEARCH.md](RESEARCH.md).** It covers the algorithms, formulas and thresholds, the Writer operations, the self-checks, the tests, and the findings and fixes from live testing.
+
+```bash
+python main.py --process research --topic "Apollo program"                  # 15 min browse + notes, 15 min write
+python main.py --process session --topic "Apollo program" --minutes 30      # the Session's browse/write do the research
+python main.py --process compose --notes tests/fixtures/pages --topic "Apollo program" --dry-run   # offline, no UI
+python -m tools.writer_smoke --shortcut-pref 0.05 # ~3 min live check of every Writer block type (then checks the .odt)
+python -m unittest discover -s tests -t .      # offline tests
+```
+
+| Stage | Module | In short |
+|---|---|---|
+| Read | `research/extract.py` | Page text from one UIA TextPattern call; headings and tables from bulk `FindAll`; boilerplate, citations, captions and table text dropped; which part was in view is recorded from the scroll position. |
+| Notes | `research/notes.py` | Sources by section, with page positions and small tables, saved as JSON. |
+| Compose | `research/compose.py`, `rank.py` | ASCII sentence pool. Score = 0.45 TextRank + 0.30 topic similarity + 0.15 position + 0.10 facts, ×1.5 if seen. The sources' headings are clustered into sections, MMR selects sentences, sentences from one source are grouped into cited paragraphs, then a templated frame and tables are added. |
+| Render | `research/writer_ops.py` | A state machine that emits only the operations needed (style, bullets, bold, size, alignment, type, table, save), following Writer's rules (what carries over Enter, Ctrl+M only in an empty paragraph). It is checked against an offline Writer model (`fake_writer.py`). |
+| Execute | `research/writer_exec.py` | Shortcuts or toolbar / menus per persona, with fallbacks. Paragraph style, font size, table and focus are checked through UIA; text is read back; word-completion suggestions are dismissed. Typing is `word_safe`, so AutoCorrect never sees a misspelled word. |
+| Orchestrate | `research/project.py`, `modes.py` | `WritingProject` (the Writer half, shared with normal mode) and `ResearchProject`: run folder, deadlines, saving, resuming, self-checks (`diagnostics.py`); `modes.py` runs the two phases. |
 
 ---
 
@@ -337,5 +393,5 @@ Measured run (80 wpm persona, 153 words): 271 s including thinking pauses (40 wp
 ## 6. Next steps
 - Compare the browsing-only model with a general one trained without `--window-filter`, using `evaluate.py`.
 - Learn scroll timing from Balabit's `Scroll` events, to replace the `ReadingParams` defaults.
-- Typing: verify the field's final text after typing into fields that autocomplete (Chrome omnibox inline completion, Word autocorrect), where Backspace can behave differently; mine CoAuthor's real rewrites to improve the heuristic alternatives; learn word-level ctrl+Backspace from free-text data (e.g. Clarkson II).
-- A session scheduler that strings tasks together (Word, email, browsing) for the 15-minute run.
+- Typing: verify the field's final text after typing into fields that autocomplete (Chrome omnibox inline completion, Writer autocorrect and word completion), where Backspace can behave differently; mine CoAuthor's real rewrites to improve the heuristic alternatives; learn word-level ctrl+Backspace from free-text data (e.g. Clarkson II).
+- A session scheduler that strings tasks together (Writer, email, browsing) for the 15-minute run.

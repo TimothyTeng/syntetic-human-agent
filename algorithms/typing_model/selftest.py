@@ -15,7 +15,7 @@ import argparse
 
 import numpy as np
 
-from .keys import SHIFTED
+from .keys import SHIFTED, word_delete_start
 from .planner import TypingConfig, plan_keystrokes
 from .runtime import TypingModel, apply_plan
 
@@ -34,9 +34,9 @@ TEXTS = [
 _UNSHIFT = {v: k for k, v in SHIFTED.items()}
 
 
-def simulate_timeline(events):
+def simulate_timeline(events, word_delete_style="windows"):
     """Apply player events to a virtual text field. Returns (text, problems)."""
-    buf, cur, shift = [], 0, False
+    buf, cur, shift, ctrl = [], 0, False, False
     problems = []
     for t, _, action, key in events:
         if action == "char":
@@ -45,6 +45,14 @@ def simulate_timeline(events):
         elif action == "down":
             if key == "shift":
                 shift = True
+            elif key == "ctrl":
+                ctrl = True
+            elif ctrl and key != "backspace":
+                problems.append(f"{t:.3f}s {key!r} pressed while Ctrl is down")
+            elif key == "backspace" and ctrl:
+                start = word_delete_start(buf, cur, word_delete_style)
+                del buf[start:cur]
+                cur = start
             elif key == "backspace":
                 if cur > 0:
                     del buf[cur - 1]
@@ -72,11 +80,13 @@ def simulate_timeline(events):
                 cur += 1
         elif action == "up" and key == "shift":
             shift = False
+        elif action == "up" and key == "ctrl":
+            ctrl = False
     return "".join(buf), problems
 
 
 def run(n=300, seed=0, verbose=True):
-    from algorithms.human_typing import build_timeline
+    from algorithms.human_typing import build_timeline, use_word_deletes
 
     model = TypingModel.load()
     if verbose:
@@ -88,12 +98,15 @@ def run(n=300, seed=0, verbose=True):
         cfg = TypingConfig(wpm=float(rng.uniform(20, 110)), revision_scale=float(rng.uniform(0.5, 3)),
                            error_scale=float(rng.uniform(0.5, 3)))
         plan = plan_keystrokes(text, model, rng, cfg)
-        if apply_plan(plan) != text:
+        style = ("windows", "openoffice")[(i // 2) % 2]
+        if i % 2:                                   # half the plans delete whole words with Ctrl+Backspace
+            plan = use_word_deletes(plan, rng, p=1.0, style=style)
+        if apply_plan(plan, word_delete_style=style) != text:
             bad_plan += 1
             if verbose:
-                print("PLAN MISMATCH:", repr(apply_plan(plan)))
+                print(f"PLAN MISMATCH ({style}):", repr(apply_plan(plan, word_delete_style=style)))
             continue
-        got, problems = simulate_timeline(build_timeline(plan, rng, model.timer))
+        got, problems = simulate_timeline(build_timeline(plan, rng, model.timer), style)
         if got != text or problems:
             bad_timeline += 1
             if verbose:

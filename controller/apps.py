@@ -6,6 +6,7 @@ File Explorer. That keeps the launch going through the normal Windows shell
 instead of being spawned directly by this Python process.
 """
 
+import ctypes
 import os
 import time
 
@@ -153,3 +154,109 @@ def close_window(title_substring=None):
     time.sleep(0.2)
     keyboard.hotkey("alt", "f4")
     return True
+
+
+# --- Win32 window queries --------------------------------------------------------
+# These use plain Win32 calls rather than UI Automation: reading a UIA property of a
+# window that is being created or destroyed raises a COM error, while Win32 simply
+# returns an empty value.
+
+def window_class(hwnd):
+    """Window class name of a handle ('' if the window is gone)."""
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def window_title(hwnd):
+    """Title of a window ('' if none or gone)."""
+    n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def top_level_windows(window_class_name=None, titled=False):
+    """Handles of visible (or minimised) top-level windows, optionally of one class /
+    with a title, in z-order (front first)."""
+    out = []
+    user32 = ctypes.windll.user32
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _collect(hwnd, _):
+        if user32.IsWindowVisible(hwnd) and (window_class_name is None or window_class(hwnd) == window_class_name) \
+                and (not titled or user32.GetWindowTextLengthW(hwnd)):
+            out.append(hwnd)
+        return True
+
+    user32.EnumWindows(_collect, 0)
+    return out
+
+
+def foreground_top_level():
+    """Handle of the top-level window in front (the root of whatever has focus)."""
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    return user32.GetAncestor(hwnd, 2) if hwnd else 0          # GA_ROOT
+
+
+def control_for(hwnd, retries=3):
+    """UIA control for a window handle, or None if the window is (still) changing."""
+    import uiautomation as auto
+    for _ in range(retries):
+        try:
+            ctrl = auto.ControlFromHandle(hwnd)
+            ctrl.ClassName                                     # touch it: fails if not ready
+            return ctrl
+        except Exception:
+            time.sleep(0.2)
+    return None
+
+
+# --- Alt+Tab order -------------------------------------------------------------
+
+def _is_switcher_window(hwnd):
+    """True for windows that appear in the Alt+Tab switcher (visible, titled, not a
+    tool window, unowned, not cloaked like suspended UWP apps)."""
+    user32 = ctypes.windll.user32
+    if not user32.IsWindowVisible(hwnd) or not user32.GetWindowTextLengthW(hwnd):
+        return False
+    if user32.GetWindow(hwnd, 4):                         # GW_OWNER: owned popups don't show
+        return False
+    if user32.GetWindowLongW(hwnd, -20) & 0x00000080:     # GWL_EXSTYLE & WS_EX_TOOLWINDOW
+        return False
+    cloaked = ctypes.c_int(0)
+    ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))  # DWMWA_CLOAKED
+    return not cloaked.value
+
+
+def switcher_windows():
+    """
+    Window handles in Alt+Tab order (most recently used first): [0] is the window in
+    front, [1] is where a single Alt+Tab goes.
+    """
+    out = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _collect(hwnd, _):
+        if _is_switcher_window(hwnd):
+            out.append(hwnd)
+        return True
+
+    ctypes.windll.user32.EnumWindows(_collect, 0)          # enumerates in z-order, top first
+    return out
+
+
+def foreground_window():
+    """Handle of the window in front."""
+    return ctypes.windll.user32.GetForegroundWindow()
+
+
+def bring_to_front(hwnd):
+    """Restore (if minimised) and activate a window by handle. Returns True if it is now in front."""
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)                         # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.3)
+    return user32.GetForegroundWindow() == hwnd

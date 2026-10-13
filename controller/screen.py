@@ -10,6 +10,7 @@ clickable point.
 """
 
 import ctypes
+import ctypes.wintypes
 import os
 import time
 
@@ -172,3 +173,91 @@ def locate_text_ocr(text, region=None, case_sensitive=False):
             bottom = max(data["top"][k] + data["height"][k] for k in range(i, last + 1))
             return left + offset_x, top + offset_y, right - left, bottom - top
     return None
+
+
+def ocr_lines(rect=None, min_conf=50):
+    """
+    OPTIONAL fallback: words on screen grouped into text lines by OCR.
+
+    rect: (left, top, right, bottom) area to read; None = primary screen.
+    Returns [[{'text', 'rect'}, ...], ...] (rect = (left, top, right, bottom) in
+    screen pixels), top to bottom, or [] if OCR is not available.
+    """
+    if not ocr_available():
+        return []
+    region = (rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]) if rect else None
+    img = screenshot(region=region)
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    ox, oy = (rect[0], rect[1]) if rect else (0, 0)
+    lines = {}
+    for i, text in enumerate(data["text"]):
+        if not text.strip() or float(data["conf"][i]) < min_conf:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        l, t = data["left"][i] + ox, data["top"][i] + oy
+        lines.setdefault(key, []).append({"text": text.strip(),
+                                          "rect": (l, t, l + data["width"][i], t + data["height"][i])})
+    ordered = sorted(lines.values(), key=lambda ws: min(w["rect"][1] for w in ws))
+    return [sorted(ws, key=lambda w: w["rect"][0]) for ws in ordered]
+
+
+def monitor_rects():
+    """(left, top, right, bottom) of every monitor, in physical pixels. Unlike
+    virtual_screen_rect(), this leaves out the dead areas between monitors of
+    different sizes, where the cursor can't go."""
+    rects = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.RECT),
+                        ctypes.c_void_p)
+    def _collect(_hmon, _hdc, rect, _data):
+        r = rect.contents
+        rects.append((r.left, r.top, r.right, r.bottom))
+        return 1
+
+    ctypes.windll.user32.EnumDisplayMonitors(None, None, _collect, 0)
+    return rects
+
+
+def on_screen(x, y, rects=None, margin=0):
+    """True if (x, y) lies on a monitor (at least `margin` px inside its edges)."""
+    for l, t, r, b in rects or monitor_rects():
+        if l + margin <= x < r - margin and t + margin <= y < b - margin:
+            return True
+    return False
+
+
+def nearest_on_screen(x, y, rects=None, margin=0):
+    """The point on any monitor (at least `margin` px inside) closest to (x, y)."""
+    best, best_d = (x, y), None
+    for l, t, r, b in rects or monitor_rects():
+        px = min(max(x, l + margin), r - 1 - margin)
+        py = min(max(y, t + margin), b - 1 - margin)
+        d = (px - x) ** 2 + (py - y) ** 2
+        if best_d is None or d < best_d:
+            best, best_d = (px, py), d
+    return best
+
+
+def window_screen_share(hwnd):
+    """Share (0-1) of its monitor's work area that a window covers (1.0 if unknown)."""
+    user32 = ctypes.windll.user32
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.wintypes.DWORD), ("rcMonitor", ctypes.wintypes.RECT),
+                    ("rcWork", ctypes.wintypes.RECT), ("dwFlags", ctypes.wintypes.DWORD)]
+    try:
+        r = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return 1.0
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        mon = user32.MonitorFromWindow(hwnd, 2)          # MONITOR_DEFAULTTONEAREST
+        if not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            return 1.0
+        w = info.rcWork
+        work = max(1, (w.right - w.left) * (w.bottom - w.top))
+        ix = max(0, min(r.right, w.right) - max(r.left, w.left))
+        iy = max(0, min(r.bottom, w.bottom) - max(r.top, w.top))
+        return min(1.0, ix * iy / work)
+    except Exception:
+        return 1.0

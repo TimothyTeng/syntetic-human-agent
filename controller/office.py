@@ -1,10 +1,12 @@
 """
-Document-level actions for Word, Excel and Notepad: open, new, save, save-as,
-handle the "save changes?" prompt, close.
+Document-level actions for OpenOffice Writer, Excel and Notepad: open, new, save,
+save-as, handle the "save changes?" prompt, close.
 
 Shortcut differences to be aware of:
-  Word / Excel : Save As dialog = F12,            Open dialog = Ctrl+F12
-  Notepad(W11) : Save As dialog = Ctrl+Shift+S,   Open dialog = Ctrl+O
+  Excel            : Save As dialog = F12,            Open dialog = Ctrl+F12
+  OpenOffice Writer: Save As dialog = Ctrl+Shift+S,   Open dialog = Ctrl+O
+                     (F12 switches numbering on and Ctrl+F12 inserts a table there!)
+  Notepad(W11)     : Save As dialog = Ctrl+Shift+S,   Open dialog = Ctrl+O
 """
 
 import os
@@ -14,16 +16,17 @@ import uiautomation as auto
 
 from . import apps, config, keyboard, ui_elements
 
-WORD_TITLE = "Word"
+WRITER_TITLE = "OpenOffice Writer"
 EXCEL_TITLE = "Excel"
 NOTEPAD_TITLE = "Notepad"
 
 
 # --- Launching ---------------------------------------------------------------
 
-def open_word(timeout=30):
-    """Open Microsoft Word from the Start menu; returns its window or None."""
-    return apps.open_via_start_menu("word", wait_title=WORD_TITLE, timeout=timeout)
+def open_writer(timeout=40):
+    """Open OpenOffice Writer from the Start menu; returns its window or None. (It opens
+    straight into a blank 'Untitled 1' document - there is no Start screen.)"""
+    return apps.open_via_start_menu("openoffice writer", wait_title=WRITER_TITLE, timeout=timeout)
 
 
 def open_excel(timeout=30):
@@ -38,8 +41,8 @@ def open_notepad(timeout=config.DEFAULT_TIMEOUT):
 
 def new_blank_from_start_screen():
     """
-    Word/Excel open on a 'Start' screen with 'Blank document/workbook'
-    pre-selected - pressing Enter opens it.
+    Excel opens on a 'Start' screen with 'Blank workbook' pre-selected - pressing
+    Enter opens it. (OpenOffice Writer has no Start screen.)
     """
     keyboard.press_key("enter")
 
@@ -56,7 +59,7 @@ def open_document(path, shortcut=("ctrl", "f12"), dialog_wait=config.DIALOG_OPEN
     """
     Open an existing file from inside the focused app via its Open dialog.
 
-    shortcut: ('ctrl','f12') for Word/Excel, ('ctrl','o') for Notepad.
+    shortcut: ('ctrl','f12') for Excel, ('ctrl','o') for OpenOffice Writer and Notepad.
     """
     keyboard.hotkey(*shortcut)
     time.sleep(dialog_wait)
@@ -75,8 +78,8 @@ def save_as(path, shortcut=("f12",), dialog_wait=config.DIALOG_OPEN_WAIT,
     """
     Save the current document to a full file path via the Save As dialog.
 
-    path:      e.g. r'C:\\Users\\me\\Documents\\notes.docx'
-    shortcut:  ('f12',) for Word/Excel, ('ctrl','shift','s') for Notepad.
+    path:      e.g. r'C:\\Users\\me\\Documents\\notes.odt'
+    shortcut:  ('f12',) for Excel, ('ctrl','shift','s') for OpenOffice Writer and Notepad.
     overwrite: if the file exists, answer 'Yes' to the replace prompt.
     """
     path = os.path.abspath(path)
@@ -115,7 +118,7 @@ def handle_save_prompt(choice="dont_save", timeout=3):
     """
     patterns = {
         "save": r"^Save$",
-        "dont_save": r"^Don.t Save$",   # Word: "Don't Save", Notepad: "Don't save"
+        "dont_save": r"^(Don.t Save|Discard)$",   # Notepad / Excel: "Don't save", OpenOffice: "Discard"
         "cancel": r"^Cancel$",
     }
     fg = ui_elements.get_foreground_window()

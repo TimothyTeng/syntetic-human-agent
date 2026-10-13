@@ -1,152 +1,256 @@
 """
-Chrome demo for the learned mouse model.
+Demos of the simulated person (the task code lives in tasks.py).
 
-  1. Open Chrome (Start menu); if the "Who's using Chrome?" picker appears,
-     move to the chosen profile and click it; maximise the browser window
-  2. Move to the address bar with a learned trajectory and click
-  3. Type a search query and press Enter
+Chrome demo (--process search, default):
+  1. Open Chrome (Start menu: Win key or the Start button); if the "Who's using
+     Chrome?" picker appears, move to the chosen profile and click it; maximise
+  2. Focus the address bar: click it with a learned trajectory, or Ctrl+L
+  3. Type the search address of an allowed site (--site) with the query, Enter
   4. Click a search result
-  5. "Read" the page: scroll bursts, pauses and small mouse drifts
-  6. Move to the Back button and click it
+  5. "Read" the page: scroll bursts, pauses, small mouse drifts and now and then
+     following a line of text with the cursor
+  6. Go back: the Back button or Alt+Left
   7. Click a different result and read a little
 
-Word demo (--process word): open Word, start a blank document, click into the page
-and type a paragraph with the learned typing model (typos + corrections, thinking
-pauses, changes of wording, arrowing back to fix things), then check the text.
+Writer demo (--process writer): open OpenOffice Writer (it starts on a blank document),
+click into the page and type a paragraph with the learned typing model (typos +
+corrections, thinking pauses, changes of wording, arrowing back to fix things), then
+check the text. (--process word is still accepted for it.)
+
+Normal (--process normal): the 30-minute office worker. 15 minutes of browsing
+(--browse-minutes): about --target-sites websites, one after another, each for a while - the
+page typed into the address bar read top-down at the person's reading pace (re-reading now
+and then), then links around the site, a search of it (a news article, a course), other
+results, back - and Chrome is closed. Then 15 minutes of writing (--write-minutes): a generated
+office document (status report, meeting notes, proposal or memo) of exactly
+--target-sentences sentences with a title, headings and varied sentences, formatted with
+shortcuts or by highlighting text and using the toolbar, saved under its title in
+runs/normal/ and Writer closed.
+
+Research (--process research --topic "..."): the same two phases for a researcher. Searches
+the topic on the allowed sites' own search pages (AP News, Coursera, then AP News for the
+topic with the main headings of the first page),
+reads the results and follows links in the articles, taking notes from every page it reads
+(page text through UI Automation, which part was in view); then writes a research paper into
+OpenOffice Writer from those notes - title, abstract, headings, paragraphs with citations,
+bold / italic, font sizes, tables, bullets, references - section by section, saving as it
+goes, and closes Writer at the end. Everything is kept in runs/research/<topic>-<time>/
+(notes, page captures, the composed paper as paper.md, the .odt); --resume DIR carries on.
+
+Compose (--process compose --notes DIR): no UI at all - writes the paper from saved notes
+(a research folder, or a folder of page captures such as tests/fixtures/pages) and prints
+it as Markdown; --dry-run also lists every Writer action the person would perform.
+
+Session (--process session): a continuous working session of --minutes minutes
+(default 15) mixing browsing, writing in Writer, entering expenses in Excel and jotting
+notes in Notepad, with idle breaks; windows opened earlier are switched back to
+(Alt+Tab) rather than reopened. The person starts fresh (a little faster and more
+accurate than their average) and slowly tires; --no-fatigue turns that off.
+
+All demos act as one simulated person (algorithms.behaviour.Persona, sampled from
+--seed): typing speed, mouse speed, whether they reach for shortcuts or the mouse,
+how long they think and how fast they read. Override single traits with --wpm,
+--pause-scale, --temperature, --shortcut-pref.
 
 Usage:
     python main.py                      # uses models/mouse_mdn.npz if present
     python main.py --no-model           # force the fallback generator
-    python main.py --query "wikipedia" --read-seconds 20 --seed 42
+    python main.py --query "climate change" --site apnews.com --read-seconds 20 --seed 42
     python main.py --profile Work --profile-index 1   # 2nd profile matching "Work"
     python main.py --list-profiles                    # print the picker's profiles and exit
-    python main.py --process word                     # type a paragraph into Word at 80 wpm
-    python main.py --process word --wpm 55 --text-file notes.txt --revisions llm
+    python main.py --process writer                   # type a paragraph into OpenOffice Writer
+    python main.py --process writer --wpm 80          # ... as an 80 wpm typist
+    python main.py --process writer --wpm 55 --text-file notes.txt --revisions llm
+    python main.py --process session --minutes 15 --seed 7
+    python main.py --process normal                   # 15 min browsing + 15 min writing
+    python main.py --process normal --target-sites 10 --target-sentences 30 --sites-file my_sites.txt
+    python main.py --process normal --browse-minutes 2 --write-minutes 2 --target-sites 2 --target-sentences 5
+    python main.py --process research --topic "Apollo program"
+    python main.py --process research --resume runs/research/apollo-program-20261001-1030
+    python main.py --process session --topic "Apollo program"   # session browsing/writing does the research
+    python main.py --process compose --notes tests/fixtures/pages --topic "Apollo program" --dry-run
 
 Abort at any time by slamming the mouse into a screen corner.
 """
 
 import argparse
-import ctypes
+import glob
+import json
+import os
 import sys
 import time
 
-import numpy as np
-import uiautomation as auto
-
-from algorithms import human_typing, reading
-from algorithms.human_mouse import HumanMouse
-from controller import browser, keyboard, office, ui_elements
-
-T0 = time.monotonic()
-
-
-def log(msg):
-    print(f"[{time.monotonic() - T0:6.1f}s] {msg}", flush=True)
+from algorithms.behaviour import Human
+from algorithms.session import Session, TaskError
+from controller import browser
+import modes
+import sites
+from tasks import (WRITER_PARAGRAPH, Workspace, click_into_document, describe_profiles, log, open_browser,
+                   open_writer_document, search_and_read, session_activities, type_into_document)
 
 
-def think(rng, median=0.6, sigma=0.5):
-    """Short human 'decision' pause between actions (log-normal)."""
-    time.sleep(float(median * np.exp(rng.normal(0, sigma))))
+def make_human(args):
+    """The simulated person for this run (persona sampled from --seed, CLI overrides win)."""
+    human = Human(seed=args.seed, use_model=not args.no_model, fatigue=not args.no_fatigue,
+                  wpm=args.wpm, pause_scale=args.pause_scale,
+                  mouse_temperature=args.temperature, shortcut_pref=args.shortcut_pref,
+                  click_spread=args.click_spread)
+    log(f"Persona: {human.persona.describe()}")
+    log(f"Mouse backend: {human.hm.backend} | click timing: {human.hm.clicks.summary()}")
+    log("Starting in 3 s - don't touch the mouse/keyboard.")
+    time.sleep(3)
+    return human
 
 
-def wait_for_navigation(settle=0.8):
-    """Give Chrome a moment to start navigating, then wait for load to finish."""
-    time.sleep(settle)
-    browser.wait_for_page_load(timeout=20)
+def run_search_demo(human, args):
+    open_browser(human, args.profile, args.profile_index)
+    search_and_read(human, args.query, args.read_seconds, link_hint=args.link_hint, site=args.site)
+    log("Demo finished.")
 
 
-# Page chrome / account links a reader wouldn't click as a "result"
-NAV_LINK_NAMES = {"skip to main content", "accessibility help", "sign in", "sign out",
-                  "settings", "privacy", "terms", "feedback", "read more", "go to google home"}
+def run_writer_demo(human, args):
+    text = args.text
+    if args.text_file:
+        with open(args.text_file, encoding="utf-8") as f:
+            text = f.read().strip()
+    win, doc = open_writer_document(human)
+    click_into_document(human, win, doc)
+    type_into_document(human, doc, text, args.revisions)
+    log("Writer demo finished (document left open, unsaved).")
 
 
-def usable_links(page_rect=None, exclude=()):
-    """Visible links with real text and a clickable size, top-to-bottom."""
-    out = []
-    for link in browser.find_links():
-        l, t, r, b = link["rect"]
-        if len(link["name"]) < 4 or (r - l) < 20 or (b - t) < 8:
-            continue
-        if link["name"].strip().lower() in NAV_LINK_NAMES:
-            continue
-        if page_rect and not (page_rect[1] + 20 < t and b < page_rect[3] - 5):
-            continue
-        if link["name"] in exclude:
-            continue
-        out.append(link)
-    return sorted(out, key=lambda k: (k["rect"][1], k["rect"][0]))
+def run_session(human, args):
+    proj = make_project(human, args)
+    ws = Workspace(human, args.profile, args.profile_index, args.revisions, research=proj)
+    try:
+        Session(human, session_activities(ws), minutes=args.minutes, log=log).run()
+    finally:
+        if proj is not None:
+            for line in proj.diag.summary():
+                log(line)
 
 
-def result_links(links):
-    """Search-result links: Google puts the result's URL in the link text."""
-    return [k for k in links if "http" in k["name"].lower()]
+def make_project(human, args):
+    """The research project for --topic / --resume (None without either)."""
+    from research.project import ResearchProject
+    kw = dict(n_sources=args.sources, paraphrase=args.paraphrase, revisions=args.revisions)
+    if args.resume:
+        return ResearchProject.resume(human, args.resume, log=log, **kw)
+    if args.topic:
+        proj = ResearchProject(human, args.topic, log=log, **kw)
+        log(f"Research folder: {proj.folder}")
+        return proj
+    return None
 
 
-def choose_link(links, rng, hint=None, top_n=8):
-    """
-    Prefer search results over page navigation. With `hint`, take the first
-    result containing it; otherwise one of the top results (upper ones likelier).
-    """
-    pool = result_links(links) or links
-    if hint:
-        for group in (pool, links):
-            matches = [k for k in group if hint.lower() in k["name"].lower()]
-            if matches:
-                return matches[0]
-    if not pool:
-        return None
-    candidates = pool[:top_n]
-    weights = 1.0 / (1 + np.arange(len(candidates)))   # people favour the top of the page
-    return candidates[rng.choice(len(candidates), p=weights / weights.sum())]
+def run_research(human, args):
+    """Browse the topic for --browse-minutes (notes from every page), then write the paper
+    for --write-minutes (modes.run_research)."""
+    proj = make_project(human, args)
+    if proj is None:
+        sys.exit("--process research needs --topic (or --resume DIR)")
+    try:
+        modes.run_research(human, args, proj)
+    finally:                                  # the self-checks, also when the run stopped early
+        for line in proj.diag.summary():
+            log(line)
 
 
-def describe_profiles(profiles):
-    return "; ".join(f"[{p['index']}] {p['name']}" + (f" ({p['account']})" if p["account"] else "")
-                     for p in profiles)
+def run_normal(human, args):
+    """Browse for --browse-minutes, then write a generated document for --write-minutes."""
+    modes.run_normal(human, args)
 
 
-def choose_profile(hm, name, index):
-    """
-    On the profile picker, move to the requested profile card with the learned
-    mouse model and click it. With no name given, the first profile is used.
-    """
-    rng = hm.rng
-    profiles = browser.list_profiles()
-    if not profiles:
-        sys.exit("Profile picker is open but no profiles were found")
-    log(f"Profile picker shown: {describe_profiles(profiles)}")
-    if name:
-        target = browser.find_profile(name, index)
-        if not target:
-            sys.exit(f"No profile matching {name!r} (index {index}). Available: {describe_profiles(profiles)}")
-    else:
-        target = profiles[0]
-        log("No --profile given - using the first one")
-    think(rng, 1.0)                              # a person scans the cards first
-    log(f"Choosing profile [{target['index']}] {target['name']} ({target['account'] or '-'})")
-    hm.click_rect(target["click_rect"])
-    if not browser.wait_for_browser_window(timeout=20):
-        sys.exit("Browser window did not open after choosing the profile")
+def run_compose(args):
+    """Compose offline from saved notes or page captures; print the paper (and, with
+    --dry-run, the Writer actions)."""
+    import numpy as np
+    from research import ir
+    from research.compose import ComposeConfig, compose_paper
+    from research.extract import parse_capture
+    from research.notes import ResearchNotes
+    from research.writer_exec import WriterExecutor
+    from research.writer_ops import render
+
+    folder = args.notes
+    if not folder:
+        sys.exit("--process compose needs --notes DIR (a research folder or a folder of page captures)")
+    if os.path.exists(os.path.join(folder, "notes.json")):     # a research run's folder
+        notes = ResearchNotes.load(folder)
+    else:                                                        # a folder of page captures (e.g. test fixtures)
+        notes = ResearchNotes(args.topic or "")
+        for path in sorted(glob.glob(os.path.join(folder, "*.json"))):
+            with open(path, encoding="utf-8") as f:
+                notes.add(parse_capture(json.load(f)))
+    topic = args.topic or notes.topic
+    if not topic:
+        sys.exit("Give the topic with --topic")
+    cfg = ComposeConfig(target_words=args.words or 800, paraphrase=args.paraphrase)
+    rng = np.random.default_rng(args.seed)
+    doc = compose_paper(notes, topic, rng, cfg)
+    print(ir.to_markdown(doc))
+    ops = render(doc, rng)                # some formatting done after typing (select, format, deselect)
+    print(f"\n<!-- {doc.word_count()} words, {len(doc.blocks)} blocks, {len(ops)} editing steps -->")
+    if args.dry_run:                     # a sampled persona "performs" the steps; actions are listed, not done
+        human = Human(seed=args.seed, use_model=False, fatigue=False, shortcut_pref=args.shortcut_pref)
+        ex = WriterExecutor(human, None, None, save_path=os.path.abspath("paper.odt"), dry_run=True)
+        ex.run(ops)
+        print(f"\n<!-- Writer actions (shortcut preference {human.persona.shortcut_pref:.2f}):")
+        for action in ex.actions:
+            print("  " + action[:110])
+        print(f"{ex.summary()} -->")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--process", default="search", choices=["search", "word"],
-                    help="search = Chrome search demo, word = type a paragraph into a new Word document")
-    ap.add_argument("--wpm", type=float, default=80, help="word demo: typing-speed persona")
-    ap.add_argument("--text", default=WORD_PARAGRAPH, help="word demo: text to type")
-    ap.add_argument("--text-file", default=None, help="word demo: type the contents of this file instead")
+    ap.add_argument("--process", default="search",
+                    choices=["search", "writer", "word", "session", "normal", "research", "compose"],
+                    help="search = Chrome search demo, writer (or word) = type a paragraph into a new "
+                         "OpenOffice Writer document, session = browse + write for --minutes, normal = browse "
+                         "the pre-selected sites then write a generated document, research = read about --topic "
+                         "then write a paper in Writer, compose = write the paper from saved notes (no UI)")
+    ap.add_argument("--browse-minutes", type=float, default=15, help="normal / research: length of the browsing phase")
+    ap.add_argument("--write-minutes", type=float, default=15, help="normal / research: length of the writing phase")
+    ap.add_argument("--target-sites", type=int, default=5,
+                    help="normal: websites to visit while browsing (each for a while: reading, following "
+                         "links around it, searching it)")
+    ap.add_argument("--target-sentences", type=int, default=35, help="normal: sentences the document has")
+    ap.add_argument("--sites-file", default=None,
+                    help="normal: pre-selected sites, one address per line (default: surfing.SITES)")
+    ap.add_argument("--topic", default=None, help="research: what to research and write about")
+    ap.add_argument("--sources", type=int, default=4,
+                    help="research: pages needed before a paper can be written (more are read while time allows)")
+    ap.add_argument("--words", type=int, default=None,
+                    help="research / compose: length of the paper (default: what fits the time left; compose 800)")
+    ap.add_argument("--paraphrase", type=int, default=1, choices=[0, 1, 2],
+                    help="research: 0 = sentences as read, 1 = light phrase rewrites, 2 = also 'According to ...'")
+    ap.add_argument("--resume", default=None, help="research: carry on with the project in this folder")
+    ap.add_argument("--notes", default=None, help="compose: research folder or folder of page captures")
+    ap.add_argument("--dry-run", action="store_true", help="compose: also list the Writer actions, perform nothing")
+    ap.add_argument("--minutes", type=float, default=15, help="session length")
+    ap.add_argument("--wpm", type=float, default=None, help="typing speed (default: from the sampled persona)")
+    ap.add_argument("--text", default=WRITER_PARAGRAPH, help="writer demo: text to type")
+    ap.add_argument("--text-file", default=None, help="writer demo: type the contents of this file instead")
     ap.add_argument("--revisions", default="heuristic", choices=["heuristic", "llm"],
-                    help="word demo: where changed wordings come from")
-    ap.add_argument("--pause-scale", type=float, default=0.7,
-                    help="word demo: thinking-pause length (1.0 = timed-essay writers)")
-    ap.add_argument("--query", default="wikipedia")
-    ap.add_argument("--link-hint", default=None, help="text the first clicked result should contain (default: query)")
-    ap.add_argument("--read-seconds", type=float, default=20)
+                    help="where changed wordings come from when composing")
+    ap.add_argument("--pause-scale", type=float, default=None,
+                    help="thinking-pause length while composing (persona default 0.7; 1.0 = timed-essay writers)")
+    ap.add_argument("--query", default="electric vehicles")
+    ap.add_argument("--site", default="apnews.com", choices=sorted(sites.SITE_SEARCH),
+                    help="search demo: the allowed site whose own search page is used (no search engine is "
+                         "reachable on the event network)")
+    ap.add_argument("--link-hint", default=None, help="text the first clicked result should contain")
+    ap.add_argument("--read-seconds", type=float, default=None,
+                    help="seconds on the first result (default: from the page's length)")
     ap.add_argument("--no-model", action="store_true", help="use the fallback generator")
-    ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--temperature", type=float, default=None, help="mouse path variety (persona default 1.0)")
+    ap.add_argument("--shortcut-pref", type=float, default=None,
+                    help="0 = always reaches for the mouse, 1 = always keyboard shortcuts (default: sampled)")
+    ap.add_argument("--click-spread", type=float, default=None,
+                    help="click scatter around element centres (persona default 0.17; smaller = more precise)")
+    ap.add_argument("--no-fatigue", action="store_true",
+                    help="keep the person at their average pace (no fresh start, no slowing down)")
+    ap.add_argument("--seed", type=int, default=None, help="reproduces the whole run, persona included")
     ap.add_argument("--profile", default=None,
                     help="profile to pick on the 'Who's using Chrome?' screen (profile or account name)")
     ap.add_argument("--profile-index", type=int, default=0,
@@ -154,278 +258,21 @@ def main(argv=None):
     ap.add_argument("--list-profiles", action="store_true",
                     help="print the profiles on an open profile picker and exit")
     args = ap.parse_args(argv)
-    if args.process == "search":
-        if args.list_profiles:
-            profiles = browser.list_profiles(timeout=1)
-            print(describe_profiles(profiles).replace("; ", "\n") if profiles else "Profile picker is not open.")
-            return
 
-        hm = HumanMouse(use_model=not args.no_model, temperature=args.temperature, seed=args.seed)
-        rng = hm.rng
-        log(f"Mouse backend: {hm.backend} | click timing: {hm.clicks.summary()}")
-        log("Starting in 3 s - don't touch the mouse/keyboard.")
-        time.sleep(3)
+    if args.list_profiles:
+        profiles = browser.list_profiles(timeout=1)
+        print(describe_profiles(profiles).replace("; ", "\n") if profiles else "Profile picker is not open.")
+        return
 
-        # 1. Open Chrome
-        log("Opening Chrome")
-        if not browser.open_chrome():
-            sys.exit("Chrome window did not appear")
-        time.sleep(1.0)
-        if browser.get_profile_picker(timeout=1):
-            choose_profile(hm, args.profile, args.profile_index)
-            time.sleep(1.0)
-        browser.maximize_chrome()
-        time.sleep(1.0)
-
-        # 2. Address bar
-        bar = browser.get_address_bar_rect()
-        if not bar:
-            sys.exit("Couldn't locate the address bar")
-        log("Moving to the address bar")
-        hm.click_rect(bar)
-        think(rng)
-
-        # Safety: never type unless Chrome's address bar really has keyboard focus
-        if not browser.address_bar_has_focus():
-            log("Address bar not focused after click - refocusing Chrome (Ctrl+L)")
-            browser.focus_chrome()
-            time.sleep(0.5)
-            keyboard.hotkey("ctrl", "l")
-            time.sleep(0.3)
-            if not browser.address_bar_has_focus():
-                sys.exit("Chrome's address bar doesn't have keyboard focus - stopping before typing anything")
-
-        # 3. Search
-        log(f"Typing search: {args.query!r}")
-        keyboard.select_all()                      # replace whatever is in the bar
-        human_typing.type_like_human(args.query, rng=rng)
-        # Chrome's inline autocomplete can swallow a Backspace (it deletes the highlighted
-        # suggestion instead of the typo). If the bar doesn't hold the query, retype it cleanly.
-        typed = browser.get_current_url()
-        if typed and not typed.startswith(args.query):
-            log(f"Address bar shows {typed!r} - retyping the query")
-            think(rng, 0.6)
-            keyboard.select_all()
-            human_typing.type_like_human(args.query, rng=rng, error_scale=0.0)
-        think(rng, 0.4)
-        keyboard.press_key("enter")
-        wait_for_navigation()
-        think(rng, 1.2)
-
-        # 4. First result
-        page = browser.get_page_rect()
-        links = usable_links(page)
-        first = choose_link(links, rng, hint=args.link_hint or args.query)
-        if not first:
-            sys.exit("No clickable links found on the results page")
-        log(f"Clicking result: {first['name'][:60]!r}")
-        hm.click_rect(first["rect"])
-        wait_for_navigation()
-
-        # 5. Read
-        log(f"Reading for ~{args.read_seconds:.0f} s")
-        reading.read_page(hm, args.read_seconds, browser.get_page_rect())
-        think(rng)
-
-        # 6. Back
-        back = browser.get_toolbar_button_rect("Back")
-        if back:
-            log("Moving to Back button")
-            hm.click_rect(back)
-        else:
-            log("Back button not found - using Alt+Left")
-            browser.go_back()
-        wait_for_navigation()
-        think(rng, 1.0)
-
-        # 7. A different result
-        links = usable_links(browser.get_page_rect(), exclude={first["name"]})
-        second = choose_link(links, rng)
-        if second:
-            log(f"Clicking another result: {second['name'][:60]!r}")
-            hm.click_rect(second["rect"])
-            wait_for_navigation()
-            reading.read_page(hm, args.read_seconds / 2, browser.get_page_rect())
-        else:
-            log("No second link found")
-
-        log("Demo finished.")
-    else:
-        hm = HumanMouse(use_model=not args.no_model, temperature=args.temperature, seed=args.seed)
-        rng = hm.rng
-        log(f"Mouse backend: {hm.backend} | click timing: {hm.clicks.summary()}")
-        log("Starting in 3 s - don't touch the mouse/keyboard.")
-        time.sleep(3)
-        run_word_demo(hm, args)
-
-
-# --- Word demo ---------------------------------------------------------------------------
-
-WORD_PARAGRAPH = (
-    "Over the past quarter, our team has focused on improving the reliability of the scheduling "
-    "system and reducing the time it takes to onboard new customers. Most of the delays we saw "
-    "earlier in the year came from manual data checks, so we introduced a simple validation step "
-    "that catches missing fields before a request reaches the operations team. As a result, the "
-    "average onboarding time dropped from nine days to just under five, and the number of support "
-    "tickets related to incorrect records fell by roughly a third. There is still work to do, "
-    "especially around reporting, where several managers have asked for clearer weekly summaries. "
-    "For the next quarter, I would suggest that we prioritise the reporting dashboard, review the "
-    "remaining manual steps with the operations leads, and set up a short feedback session with "
-    "two or three of our largest customers to understand what they would like to see improved."
-)
-
-# Word's AutoCorrect turns straight quotes into curly ones; compare text without them
-_QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
-
-
-WORD_WINDOW_CLASS = "OpusApp"
-
-
-def word_window_handles():
-    """Handles of every open Word window (any state: minimised, Start screen, document)."""
-    return {w.NativeWindowHandle for w in auto.GetRootControl().GetChildren()
-            if w.ClassName == WORD_WINDOW_CLASS}
-
-
-def foreground_word_window(timeout=30, ignore=()):
-    """
-    The Word window that is in front, as a UIA control (None on timeout).
-    ignore: handles to skip - pass the Word windows that were already open so only
-            the newly launched one is accepted.
-
-    Window titles can't tell Word's states apart: with another document open, the
-    Start screen of a new window is already titled "Document2 - Word".
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            win = auto.GetForegroundControl().GetTopLevelControl()
-        except Exception:
-            win = None
-        if win is not None and win.ClassName == WORD_WINDOW_CLASS and win.NativeWindowHandle not in ignore:
-            return win
-        time.sleep(0.25)
-    return None
-
-
-def word_blank_document_tile(win, timeout=4):
-    """The 'Blank document' tile if `win` is showing Word's Start screen, else None."""
-    tile = auto.ListItemControl(searchFromControl=win, searchDepth=10, Name="Blank document")
-    if tile.Exists(maxSearchSeconds=timeout, searchIntervalSeconds=0.25) and ui_elements.is_visible(tile):
-        return tile
-    return None
-
-
-def word_document(win=None, timeout=10):
-    """(window, editing surface) of a Word window (default: the one in front). The
-    surface is a DocumentControl named after the document, e.g. 'Document1'."""
-    win = win or foreground_word_window(timeout)
-    if not win:
-        return None, None
-    doc = auto.DocumentControl(searchFromControl=win)
-    if not doc.Exists(maxSearchSeconds=timeout, searchIntervalSeconds=0.25):
-        return win, None
-    return win, doc
-
-
-def word_document_has_focus(doc):
-    """True if keyboard input would go into this Word document."""
-    focused = auto.GetFocusedControl()
-    if focused is None or doc is None:
-        return False
-    if foreground_word_window(timeout=0.5) is None:
-        return False
-    return focused.ControlType == auto.ControlType.DocumentControl or focused.ClassName == "_WwG"
-
-
-def word_document_text(doc):
-    """Current text of the document (Word ends paragraphs with '\\r'), or None."""
+    if args.process == "compose":
+        run_compose(args)
+        return
+    run = {"search": run_search_demo, "writer": run_writer_demo, "word": run_writer_demo, "session": run_session,
+           "normal": run_normal, "research": run_research}[args.process]
     try:
-        return doc.GetTextPattern().DocumentRange.GetText(-1)
-    except Exception:
-        return None
-
-
-def run_word_demo(hm, args):
-    """
-    Open Word, start a blank document, click into the page with the learned mouse
-    model and type a paragraph with the learned typing model (typos and their
-    corrections, thinking pauses, changes of wording, going back to fix things).
-    """
-    rng = hm.rng
-    text = args.text
-    if args.text_file:
-        with open(args.text_file, encoding="utf-8") as f:
-            text = f.read().strip()
-
-    # 1. Word + blank document
-    already_open = word_window_handles()       # never type into a document that was already open
-    log("Opening Word")
-    office.open_word()
-    win = foreground_word_window(timeout=30, ignore=already_open)
-    if win is None:
-        sys.exit("A new Word window did not appear")
-    time.sleep(2.0)                            # Word's Start screen needs a moment to settle
-    tile = word_blank_document_tile(win)
-    if tile is not None:                       # Start screen: click "Blank document"
-        log("Clicking 'Blank document'")
-        think(rng, 0.8)                        # a person glances over the Start screen first
-        hm.click_rect(ui_elements.element_rect(tile))
-        deadline = time.time() + 20
-        while word_blank_document_tile(win, timeout=0) is not None:
-            if time.time() > deadline:
-                log("Start screen still showing - pressing Enter")
-                office.new_blank_from_start_screen()
-                break
-            time.sleep(0.25)
-    else:
-        log("No Start screen - Word opened straight into a document")
-    time.sleep(1.0)
-    ctypes.windll.user32.ShowWindow(win.NativeWindowHandle, 3)     # SW_MAXIMIZE, this window only
-    time.sleep(1.0)
-
-    # 2. Click into the page, like a person would, then make sure typing goes there
-    win, doc = word_document(win)
-    if doc is None:
-        sys.exit("Couldn't find the Word document area")
-    l, t, r, b = ui_elements.element_rect(doc)
-    top_of_page = (l + (r - l) * 0.25, t + 40, l + (r - l) * 0.75, t + min(160, (b - t) * 0.25))
-    log("Clicking into the document")
-    think(rng, 0.8)
-    hm.click_rect(top_of_page)
-    think(rng, 0.5)
-    keyboard.hotkey("ctrl", "end")             # caret at the end of the (empty) document
-    if not word_document_has_focus(doc):
-        log("Document not focused after click - activating Word")
-        win.SetActive()
-        time.sleep(0.5)
-        if not word_document_has_focus(doc):
-            sys.exit("The Word document doesn't have keyboard focus - stopping before typing anything")
-
-    # 3. Type
-    words = len(text.split())
-    log(f"Typing {words} words at a {args.wpm:.0f} wpm persona (revisions: {args.revisions})")
-    t0 = time.monotonic()
-    plan = human_typing.type_like_human(text, rng=rng, wpm=args.wpm, mode="compose",
-                                        revisions=args.revisions, pause_scale=args.pause_scale, max_pause=4.0)
-    took = time.monotonic() - t0
-    tags = {tag: sum(1 for k in plan if k.tag == tag) for tag in ("typo", "fix", "false_start", "lost", "nav")}
-    log(f"Typed in {took:.0f} s = {len(text) / 5 / (took / 60):.0f} wpm effective "
-        f"({len(plan)} keystrokes; typos {tags['typo']}, correction keys {tags['fix']}, "
-        f"false-start keys {tags['false_start']}, lost-thought deletions {tags['lost']}, "
-        f"arrow keys for revisions {tags['nav']})")
-
-    # 4. Check what landed in the document
-    time.sleep(0.5)
-    got = word_document_text(doc)
-    if got is None:
-        log("Couldn't read the document text back to check it")
-    elif got.strip().translate(_QUOTES) == text.strip():
-        log("Document text matches exactly")
-    else:
-        log("Document text differs from the intended text (Word AutoCorrect or a missed key):")
-        log(f"  got: {got.strip()[:300]!r}")
-    log("Word demo finished (document left open, unsaved).")
+        run(make_human(args), args)
+    except TaskError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":

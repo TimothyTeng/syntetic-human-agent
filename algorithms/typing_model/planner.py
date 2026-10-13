@@ -52,6 +52,9 @@ class TypingConfig:
     intext_revisions: bool = True    # allow arrow-key navigation back into the text
     p_late_notice: float = None      # compose: share of typos noticed only later (None = from data)
     max_travel: int = 60             # compose: furthest (chars) the writer arrows back to fix
+    word_safe: bool = False          # typos are noticed before their word ends - for editors such as
+                                     # Writer or Word, whose AutoCorrect rewrites a misspelled word once a space
+                                     # follows it, which would throw the later fix off
 
 
 @dataclass
@@ -246,6 +249,8 @@ class _Writer:
             return False
         self.attempts[j] = self.attempts.get(j, 0) + 1
         typed, consumed = make_typo(self.eff, j, self.errors.sample_type(self.rng), self.rng)
+        if self.cfg.word_safe and any(not ch.isalnum() for ch in list(typed or []) + list(self.eff[j:j + consumed])):
+            return False               # a typo running into a space / punctuation: AutoCorrect would act on it
         if not typed:
             return False
         for ch in typed:
@@ -254,7 +259,8 @@ class _Writer:
         if self.cfg.allow_uncorrected and self.rng.random() < self.errors.d["p_uncorrected"]:
             self.eff = self.eff[:j] + typed + self.eff[j + consumed:]     # it stays
             return True
-        late = self.mode == "compose" and self.cfg.intext_revisions and self.flaw is None
+        late = (self.mode == "compose" and self.cfg.intext_revisions and self.flaw is None
+                and not self.cfg.word_safe)
         if late and self.rng.random() < self.p_late:
             if self._set_flaw(j, typed, "".join(self.eff[j:j + consumed]), consumed):
                 return True
@@ -270,7 +276,7 @@ class _Writer:
                     break
             limit += 1
         for ch in self.eff[p:min(p + d, limit)]:
-            if ch == "\n":
+            if ch == "\n" or (self.cfg.word_safe and not ch.isalnum()):
                 break
             self.press(ch, "cont")
         self._delete_to_prefix("fix", extra=self.errors.sample_extra(self.rng))

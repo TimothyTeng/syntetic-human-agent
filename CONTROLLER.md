@@ -124,7 +124,7 @@ if box:
 
 ## `controller/ui_elements.py` — find buttons and controls by name
 
-This uses the Windows accessibility tree, the same data screen readers use. It works for the Office ribbon, Save/Open dialogs, Notepad, Explorer and Chrome. **It is preferred over image matching** because it is resolution-independent and returns exact rectangles.
+This uses the Windows accessibility tree, the same data screen readers use. It works for the Office ribbon, OpenOffice's toolbars and menus, Save/Open dialogs, Notepad, Explorer and Chrome. **It is preferred over image matching** because it is resolution-independent and returns exact rectangles.
 
 Common `control_type` values: `'ButtonControl'`, `'EditControl'`, `'HyperlinkControl'`, `'MenuItemControl'`, `'TabItemControl'`, `'ListItemControl'`, `'TextControl'`, `'DocumentControl'`, `'CheckBoxControl'`, `'ComboBoxControl'`.
 
@@ -141,11 +141,14 @@ Common `control_type` values: `'ButtonControl'`, `'EditControl'`, `'HyperlinkCon
 | `click_element(ctrl, duration=0, button='left')` | Moves the mouse to the element and clicks it. |
 | `list_elements(window, control_type=None)` | **Debug:** prints the name, type and rect of every element, so you can discover names. |
 | `list_buttons(window)` | **Debug:** prints every visible button. |
+| `find_all_fast(root, control_type=None, properties=None, exclude=None)` | Every descendant matching a control type and property values (`{PropertyId: value}`), with optional exclusions, in **one** UIA `FindAll` call. A long web page answers in 0.2-2 s, where walking the tree element by element takes tens of seconds. Returns `[]` on any failure. |
+| `property_value(ctrl, property_id, default=None)` | Any UIA property by id, including ones uiautomation has no wrapper for (e.g. `30173`, HeadingLevel). |
+| `range_text(pattern, ctrl, max_chars)` | An element's text read through the enclosing document's TextPattern. Unlike `Name`, it includes text inside links and nested elements. |
 
 ```python
-word = ui_elements.get_window("Word")
-ui_elements.list_buttons(word)                         # discover names first
-bold = ui_elements.find_element(word, "Bold", "ButtonControl")
+writer = ui_elements.get_window("OpenOffice Writer")
+ui_elements.list_buttons(writer)                       # discover names first
+bold = ui_elements.find_element(writer, "Bold", "ButtonControl")
 ui_elements.click_element(bold, duration=0.3)
 ```
 
@@ -164,36 +167,60 @@ ui_elements.click_element(bold, duration=0.3)
 | `get_window_rect(title_substring)` | Returns `(left, top, right, bottom)` of the window. |
 | `close_window(title_substring=None)` | Focuses the window (if a title is given), then presses Alt+F4. |
 
-## `controller/office.py` — Word, Excel and Notepad document actions
+## `controller/office.py` — OpenOffice Writer, Excel and Notepad document actions
 
 | App | Save As | Open dialog |
 |---|---|---|
-| Word / Excel | `F12` (default) | `Ctrl+F12` (default) |
+| Excel | `F12` (default) | `Ctrl+F12` (default) |
+| OpenOffice Writer | `shortcut=('ctrl','shift','s')` | `shortcut=('ctrl','o')` |
 | Notepad (Win 11) | `shortcut=('ctrl','shift','s')` | `shortcut=('ctrl','o')` |
+
+In Writer, F12 switches numbering on and Ctrl+F12 opens Insert Table, so never use the defaults there.
 
 | Function | Description |
 |---|---|
-| `open_word(timeout=30)` / `open_excel(timeout=30)` / `open_notepad()` | Launch via the Start menu and return the window. |
-| `new_blank_from_start_screen()` | Presses Enter on the Word/Excel start screen to open a blank document. |
+| `open_writer(timeout=40)` / `open_excel(timeout=30)` / `open_notepad()` | Launch via the Start menu and return the window. Writer opens straight into a blank "Untitled 1" document. |
+| `new_blank_from_start_screen()` | Presses Enter on Excel's start screen to open a blank workbook. |
 | `new_document()` | Ctrl+N. |
 | `open_document(path, shortcut=('ctrl','f12'), ...)` | Opens a file through the app's Open dialog. |
 | `save_document()` | Ctrl+S. |
 | `save_as(path, shortcut=('f12',), overwrite=True, ...)` | Opens Save As, types the full path, presses Enter, and answers "Replace?" if the file exists. |
 | `handle_replace_prompt(overwrite=True, timeout=3)` | Clicks Yes or No on the "already exists" prompt. |
-| `handle_save_prompt(choice='dont_save', timeout=3)` | Answers the "Save changes?" prompt on close. `choice` is `'save'`, `'dont_save'` or `'cancel'`. |
+| `handle_save_prompt(choice='dont_save', timeout=3)` | Answers the "Save changes?" prompt on close. `choice` is `'save'`, `'dont_save'` ("Don't Save", or "Discard" in OpenOffice) or `'cancel'`. |
 | `close_document()` | Ctrl+W: closes the document but keeps the app open. |
 | `close_app(title_substring)` | Alt+F4 on the app window. |
 
-Example Word flow:
+Example Writer flow:
 
 ```python
-office.open_word()
+office.open_writer()
 time.sleep(2)
-office.new_blank_from_start_screen()
 keyboard.type_text("Quarterly summary\n")
-office.save_as(r"C:\Users\me\Documents\summary.docx")
-office.close_app("Word")
+office.save_as(r"C:\Users\me\Documents\summary.odt", shortcut=("ctrl", "shift", "s"))
+office.close_app("OpenOffice Writer")
 ```
+
+## `controller/writer.py` — OpenOffice Writer: toolbar lookup and reading the document back
+
+Used by research mode (`research/writer_exec.py`) to find toolbar and menu controls and to check edits. It never presses keys or moves the mouse itself. Lookups are *tolerant*: a UIA `COMError` while Writer redraws is retried, then reported as "not found".
+
+What Writer (Apache OpenOffice 4.1, IAccessible2 seen through UIA's MSAA proxy) exposes: the document's paragraphs **on screen** as children of its `DocumentControl`, each with its text as the MSAA value; the caret's paragraph and a focused toolbar box marked FOCUSED (`GetFocusedControl()` only returns the window); the Formatting toolbar's Apply Style and Font Size boxes showing the style and size at the caret. Toggle buttons don't report whether they are on, so bold / italic / alignment can't be read back.
+
+| Function | Description |
+|---|---|
+| `is_writer_window(hwnd)` / `writer_windows()` | A Writer document window (class `SALFRAME`, title ending "OpenOffice Writer") / all of them. |
+| `document_control(win, timeout=5)` | The editing surface (`DocumentControl`). Re-find it after a save. |
+| `focus_kind(win, doc=None)` | Where keys would go: `'document'`, `'toolbar'` (a toolbar button after a click: Writer keeps marking it focused, keys still reach the page), `'field'` (Apply Style / Font Name / Font Size box), `'other'` or `'elsewhere'`. |
+| `document_has_focus(win, doc=None)` / `foreground_in_writer(win)` | Keys go into the page / the window in front belongs to OpenOffice (document or dialog). |
+| `caret_paragraph_style(win)` / `caret_font_size(win)` | The style (`'Heading 1'`, `'Text body'`, ...) / size in points at the caret, from the Formatting toolbar, or `None`. |
+| `caret_in_table(doc)` / `table_count(doc)` | Whether the caret is in a table cell (`None` if unknown) / tables on screen. |
+| `caret_paragraph_text(doc, assume_end=False)` / `pending_completion(doc, typed)` | The caret paragraph's text / how many letters of a word-completion suggestion show after `typed`. |
+| `document_text(doc)` / `normalise(text)` | The text on screen / the text with AutoCorrect's typing changes undone (smart quotes, dashes, bullet glyphs, cell markers, breaks), for comparisons. |
+| `formatting_toolbar(win)` / `toolbar_button(win, name, toolbar='Formatting')` | The Formatting toolbar / a visible button on a toolbar by name or regex (`'Bold'`, `'Cent(red\|ered)'`, `'Bullets On/Off'`, `'Save'` on Standard). |
+| `style_box(win)` / `font_size_box(win)` | The Apply Style / Font Size box's edit field. |
+| `menu(win, name)` / `menu_item(parent, name)` | A menu-bar menu (`'Insert'`) / an item of the open menu (regex, e.g. `'Table\.\.\.'`). |
+| `find_dialog(title, timeout=3)` / `dialog_control(dialog, name, control_type)` | A Writer dialog in front (`'Insert Table'`) / one of its controls (`'Columns'`, `'Heading'`). |
+| `is_focused(ctrl)` / `is_checked(ctrl)` | MSAA FOCUSED / CHECKED state. |
 
 ## `controller/browser.py` — Chrome
 
@@ -226,6 +253,8 @@ office.close_app("Word")
 | `find_link(text, exact=False, visible_only=True)` | Returns the first link whose text matches (case-insensitive). |
 | `click_link(text, exact=False, duration=0)` | Finds a visible link, moves to it and clicks. Returns True/False. |
 | `scroll_until_link_visible(text, step=-3, max_scrolls=15, pause=0.4)` | Scrolls until the link is in view and returns it. |
+| `page_document(win=None)` | The current page's `DocumentControl`; accessibility is requested from Chrome first. |
+| `page_text(max_chars=400_000)` | The whole page's text (`''` if the page doesn't expose it). |
 
 ```python
 links = browser.find_links()
@@ -243,7 +272,7 @@ mouse.click(*links[0]["center"], duration=0.5)
 - **`wait_for_window`, `wait_for_element`, `wait_for_image`, `wait_for_page_load`**: your algorithm must not act before the UI is ready. Without these, clicks land on nothing.
 - **`list_elements` / `list_buttons` / `find_links`**: debug helpers for discovering the exact names of buttons and links on *your* machine, instead of hard-coding coordinates.
 - **`handle_replace_prompt` / `handle_save_prompt`**: dialogs pop up during save and close and would otherwise block the run.
-- **Clipboard helpers** (`set_clipboard`, `paste_text`): needed for non-ASCII text, and useful for "copy from web → paste into Word" tasks.
+- **Clipboard helpers** (`set_clipboard`, `paste_text`): needed for non-ASCII text, and useful for "copy from web → paste into Writer" tasks.
 - **`get_current_url`, `get_page_title`, `is_running`, `get_window_rect`**: state checks your algorithm can branch on.
 - **`get_address_bar_rect`, `get_toolbar_button_rect`, `get_page_rect`**: give the behaviour layer real on-screen targets to move the mouse to.
 

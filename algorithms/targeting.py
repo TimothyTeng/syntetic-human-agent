@@ -43,3 +43,31 @@ def random_point_in(rect, rng, inset=0.1):
     w, h = right - left, bottom - top
     return (int(rng.uniform(left + inset * w, right - inset * w)),
             int(rng.uniform(top + inset * h, bottom - inset * h)))
+
+
+def primary_aim(rect, point, start, rng, along=0.012, across=0.006, undershoot=0.008):
+    """
+    Where the fast, primary part of an aimed movement actually lands.
+
+    Aimed movements are a fast primary movement followed, when it misses, by a short
+    corrective one (Meyer et al.'s optimised-submovement model, which underlies Fitts's
+    law). The primary endpoint scatters in proportion to the distance moved - more
+    along the movement direction than across it, with a slight undershoot.
+
+    Small targets are therefore often missed and need a correction; large ones almost
+    never. Returns (x, y), which may lie outside `rect`.
+    """
+    sx, sy = start
+    tx, ty = point
+    d = float(np.hypot(tx - sx, ty - sy))
+    if d < 1:
+        return point
+    ux, uy = (tx - sx) / d, (ty - sy) / d
+    a = rng.normal(-undershoot * d, along * d + 1.0)     # along the movement
+    c = rng.normal(0.0, across * d + 1.0)                # sideways
+    return int(round(tx + a * ux - c * uy)), int(round(ty + a * uy + c * ux))
+
+
+def inside(point, rect, pad=0):
+    """True if point lies inside rect shrunk by `pad` pixels on every side."""
+    return rect[0] + pad <= point[0] <= rect[2] - pad and rect[1] + pad <= point[1] <= rect[3] - pad

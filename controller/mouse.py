@@ -6,11 +6,20 @@ All coordinates are absolute screen pixels (0,0 = top-left of primary monitor).
 `tween` lets the caller pick an easing curve from pyautogui (e.g.
 pyautogui.easeInOutQuad) - the future entropy layer can also replace movement
 entirely by calling move_to() repeatedly along its own generated path.
+
+Cursor movement is sent as real absolute mouse-move events (win_input.SendInput),
+not SetCursorPos, so input listeners and the system idle timer see it like a
+physical mouse. Buttons and the wheel go through pyautogui (mouse_event).
 """
+
+import time
 
 import pyautogui
 
 from . import config  # noqa: F401  (applies DPI / pyautogui settings)
+from . import win_input
+
+MOVE_RATE_HZ = 125   # update rate for timed moves - a typical USB mouse polling rate
 
 # On Windows pyautogui passes the scroll amount straight through as the raw
 # wheel delta, where one physical wheel notch = 120. We convert so that
@@ -20,8 +29,7 @@ WHEEL_DELTA = 120
 
 def get_position():
     """Return the current mouse cursor position as (x, y)."""
-    pos = pyautogui.position()
-    return pos.x, pos.y
+    return win_input.cursor_pos()
 
 
 def move_to(x, y, duration=0.0, tween=pyautogui.linear):
@@ -31,12 +39,24 @@ def move_to(x, y, duration=0.0, tween=pyautogui.linear):
     duration: seconds the movement takes (0 = instant).
     tween:    easing function controlling speed along the path.
     """
-    pyautogui.moveTo(x, y, duration=duration, tween=tween)
+    if duration <= 0:
+        win_input.send_mouse_move(x, y)
+        return
+    x0, y0 = get_position()
+    steps = max(2, int(duration * MOVE_RATE_HZ))
+    t0 = time.perf_counter()
+    for i in range(1, steps + 1):
+        f = tween(i / steps)
+        win_input.send_mouse_move(round(x0 + (x - x0) * f), round(y0 + (y - y0) * f))
+        delay = t0 + duration * i / steps - time.perf_counter()
+        if delay > 0:
+            time.sleep(delay)
 
 
 def move_relative(dx, dy, duration=0.0, tween=pyautogui.linear):
     """Move the cursor by (dx, dy) pixels from its current position."""
-    pyautogui.moveRel(dx, dy, duration=duration, tween=tween)
+    x0, y0 = get_position()
+    move_to(x0 + dx, y0 + dy, duration=duration, tween=tween)
 
 
 def click(x=None, y=None, button="left", duration=0.0):
@@ -84,7 +104,11 @@ def drag_to(x, y, duration=0.5, button="left"):
     or moving a window. A non-zero duration is recommended; many apps ignore
     drags that happen instantly.
     """
-    pyautogui.dragTo(x, y, duration=duration, button=button)
+    mouse_down(button)
+    try:
+        move_to(x, y, duration=duration)
+    finally:
+        mouse_up(button)
 
 
 def scroll(amount, x=None, y=None):
