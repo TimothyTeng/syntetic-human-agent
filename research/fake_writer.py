@@ -189,6 +189,11 @@ class FakeWriter:
         self.bold = self.italic = self.direct = False
         self.size = None
 
+    def op_paste_table(self, op):
+        """No effect: the table's typed operations that follow build the same cells (the real
+        executor pastes instead and skips them)."""
+        assert self.table is None and not self.cur["runs"], "paste_table outside an empty paragraph"
+
     def op_next_cell(self, op):
         """Tab: the next cell (along the row, then down); in the last cell it adds a row,
         as in Writer. The new cell starts unformatted."""

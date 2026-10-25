@@ -3,9 +3,14 @@ The two 30-minute runs: a browsing phase, then a writing phase, each of fixed le
 (--browse-minutes / --write-minutes, 15 each by default).
 
 normal    visit about --target-sites of the allowed websites (surfing.SiteSource), each for a
-          while - reading, following links around it, searching it; close Chrome. Then write a generated office document
-          of exactly --target-sentences sentences (office_writing.OfficeProject) in
-          OpenOffice Writer, save it under its title and close Writer.
+          while - reading, following links around it, searching it - now and then copying a
+          page's address into a scratch note in Notepad; close Chrome. Then, in the writing
+          phase's time: open Writer, build last month's budget sheet in OpenOffice Calc
+          (--sheet-minutes: spreadsheet_ops - totals, a SUMPRODUCT summary copied down,
+          formats, a column chart; saved as .ods), jot its totals in the note, and write a generated office document of
+          exactly --target-sentences sentences (office_writing.OfficeProject) in OpenOffice
+          Writer that quotes the totals and pastes the sheet's summary in as a table; save it
+          under its title, close Writer and Calc, save the note as notes.txt.
 research  search the topic and follow links in the articles, taking notes from every page
           (surfing.ResearchSource + research.project.ResearchProject); close Chrome. Then
           compose a paper from those notes to fit the writing time, type it, save it, close
@@ -29,6 +34,9 @@ from tasks import Workspace, close_writer, log
 
 CLOSE_RESERVE = 20.0     # seconds kept at the end of browsing to close Chrome
 SAVE_RESERVE = 45.0      # seconds kept at the end of writing for the last save and closing Writer
+TIDY_RESERVE = 40.0      # normal mode: ... and for closing Calc and saving the scratch note
+MAX_SHEET_SHARE = 0.4    # the budget sheet takes at most this share of the writing phase
+MIN_SHEET = 60.0         # seconds: less than this and there is no budget sheet
 
 
 def clock(seconds):
@@ -36,20 +44,34 @@ def clock(seconds):
 
 
 def run_normal(human, args):
-    """Normal mode: browse (target sites), then write a generated document (target sentences)."""
+    """Normal mode: browse (target sites, links noted in Notepad now and then), build the budget
+    sheet in Calc, then write a generated document (target sentences) that quotes it."""
     from office_writing import OfficeProject
+    from spreadsheet_ops import generate_budget, rows_for_time
     start = time.monotonic()
     browse_end = start + args.browse_minutes * 60
     write_end = browse_end + args.write_minutes * 60
-    log(f"=== Normal mode: browsing {args.browse_minutes:g} min (target {args.target_sites} sites), then writing "
-        f"{args.write_minutes:g} min (target {args.target_sentences} sentences)")
+    sheet_seconds = min(args.sheet_minutes, args.write_minutes * MAX_SHEET_SHARE) * 60
+    log(f"=== Normal mode: browsing {args.browse_minutes:g} min (target {args.target_sites} sites), then "
+        + (f"a budget sheet in Calc ({sheet_seconds / 60:.1f} min) and " if sheet_seconds >= MIN_SHEET else "")
+        + f"writing {args.write_minutes:g} min in all (target {args.target_sentences} sentences)")
     ws = Workspace(human, args.profile, args.profile_index, args.revisions)
+    ws.scratch = True
     sites = load_sites(args.sites_file) if args.sites_file else None
     browse_phase(human, ws, start, browse_end, SiteSource(human.rng, sites), target_sites=args.target_sites)
-    proj = OfficeProject(human, args.target_sentences, revisions=args.revisions, log=log)
+    budget, sheet_end = None, browse_end + sheet_seconds
+    if sheet_seconds >= MIN_SHEET:
+        # Writer first: OpenOffice shows UI Automation only its first window. Opening it can take a
+        # minute, so the sheet is sized to the time that is left after it
+        attempt("Opening Writer", ws.writer_window)
+        budget = generate_budget(human.rng, rows_for_time(sheet_end - time.monotonic(), human.persona.wpm))
+    proj = OfficeProject(human, args.target_sentences, revisions=args.revisions, log=log, budget=budget)
     ws.project = proj
-    write_phase(human, ws, proj, browse_end, write_end)
-    log(f"=== Normal mode finished in {clock(time.monotonic() - start)} - document: {proj.doc_path}")
+    if budget is not None:
+        sheet_phase(human, ws, proj, browse_end, sheet_end)
+    write_phase(human, ws, proj, time.monotonic(), write_end, reserve=SAVE_RESERVE + TIDY_RESERVE,
+                tidy=lambda: tidy_up(ws, proj))
+    log(f"=== Normal mode finished in {clock(time.monotonic() - start)} - files in {proj.folder}")
 
 
 def run_research(human, args, proj):
@@ -73,6 +95,46 @@ def run_research(human, args, proj):
         f"{clock(time.monotonic() - start)} - files in {proj.folder}")
 
 
+def sheet_phase(human, ws, proj, start, end):
+    """Build the project's budget sheet in Calc (the optional steps while there is time before
+    `end`) and note its totals in the scratch note. Writer is opened before this (OpenOffice shows
+    UI Automation only its first window, so the report's window comes first). If the sheet can't
+    be built the report's table is typed instead of pasted."""
+    from spreadsheet_ops import money
+    budget = proj.budget
+    log(f"--- Spreadsheet phase ({clock(end - start)}): {len(budget.rows)} expenses for {budget.month}")
+    if not attempt("Spreadsheet", lambda: ws.build_sheet(budget, proj.sheet_path, deadline=end)):
+        return
+    cat, cents, _ = budget.top
+    human.think("mental")
+    attempt("Note", lambda: ws.jot(f"{budget.month} spend {money(budget.total)}, {cat.lower()} highest "
+                                   f"at {money(cents)}"))
+
+
+def tidy_up(ws, proj):
+    """After the report: close Calc (the sheet was saved) and save the scratch note next to
+    the report, closing its page."""
+    if ws.calc_win is not None:
+        attempt("Closing Calc", ws.close_sheet)
+    if ws.notepad:
+        attempt("Saving the note", lambda: ws.save_note(proj.notes_path))
+
+
+def attempt(what, action):
+    """Run a step that may fail without ending the run (a TaskError or an unexpected UI / COM
+    error is logged); the emergency stop still stops everything. True if it went through."""
+    try:
+        action()
+        return True
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        if type(exc).__name__ == "FailSafeException":
+            raise
+        log(f"{what} stopped ({type(exc).__name__}: {exc})")
+        return False
+
+
 def browse_phase(human, ws, start, end, source, target_sites=None):
     """Browse until `end` (minus the time to close Chrome), close Chrome, wait out the rest."""
     log(f"--- Browsing phase ({clock(end - start)})")
@@ -84,21 +146,23 @@ def browse_phase(human, ws, start, end, source, target_sites=None):
     wait_until(end, "browsing")
 
 
-def write_phase(human, ws, proj, start, end):
+def write_phase(human, ws, proj, start, end, reserve=SAVE_RESERVE, tidy=None):
     """Write the project's document section by section until `end`, reading it over when
-    there is time to spare, then save it and close Writer."""
+    there is time to spare, then save it and close Writer. reserve: seconds kept at the end for
+    saving and closing; tidy: called after Writer is closed (normal mode closes Calc and saves
+    its note)."""
     rng = human.rng
     left = lambda: end - time.monotonic()    # noqa: E731
-    need, have = proj.remaining_seconds(), max(0.0, left() - SAVE_RESERVE)
+    need, have = proj.remaining_seconds(), max(0.0, left() - reserve)
     log(f"--- Writing phase ({clock(end - start)}): about {need / 60:.1f} min of typing for {have / 60:.1f} min")
     if need > have:
         log(f"At {human.persona.wpm:.0f} wpm the whole document probably won't fit - it is saved as far as it "
             f"gets (a smaller --target-sentences or a faster --wpm fits it)")
     failures = 0
-    while not proj.finished and left() - SAVE_RESERVE > 15:
+    while not proj.finished and left() - reserve > 15:
         before = proj.op_index
         try:
-            ws.write(left() - SAVE_RESERVE)
+            ws.write(left() - reserve)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:              # TaskError, or an unexpected UI / COM error
@@ -115,18 +179,20 @@ def write_phase(human, ws, proj, start, end):
             break
         if proj.finished:
             break
-        spare = left() - SAVE_RESERVE - proj.remaining_seconds() * 1.15
+        spare = left() - reserve - proj.remaining_seconds() * 1.15
         if spare > 40 and rng.random() < 0.6:     # ahead of time: read over what's written
             ws.review_document(min(spare * float(rng.uniform(0.2, 0.45)), 120.0))
         else:
             human.think("mental", 1.5)            # what comes next
-    while left() - SAVE_RESERVE > 25 and ws.writer_win is not None:   # done early (or the next part
+    while left() - reserve > 25 and ws.writer_win is not None:   # done early (or the next part
         # won't fit): read it over and think until it is time to save and close
-        ws.review_document(min(left() - SAVE_RESERVE - 10, float(rng.uniform(40, 120))))
-        pause = min(left() - SAVE_RESERVE - 5, float(rng.uniform(5, 25)))
+        ws.review_document(min(left() - reserve - 10, float(rng.uniform(40, 120))))
+        pause = min(left() - reserve - 5, float(rng.uniform(5, 25)))
         if pause > 0:
             time.sleep(pause)
     finish_document(human, ws, proj)
+    if tidy:
+        tidy()
     wait_until(end, "writing")
 
 

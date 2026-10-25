@@ -20,21 +20,28 @@ Sections lean on the structures that suit them (questions under "Open Questions"
 under "Next Steps", numbers under "Key Metrics"), no structure or first word repeats back to
 back and no sentence is used twice. Some key phrases are set in bold or italic.
 
-Exactly n_sentences sentences are written (bullet items and the bold line count as one each;
-the title, headings and the date line don't). Everything passes ir.validate(): ASCII only and
-nothing Writer's AutoCorrect would rewrite while typing.
+With a budget (spreadsheet_ops.Budget - the sheet built in Calc just before), the document
+also has a spending section before its last one: the month's total in bold, the biggest
+category, a caption and the summary table, which is copied from the sheet and pasted in.
+
+Exactly n_sentences sentences are written (bullet items, the bold line and the spending
+section's sentences count as one each; the title, headings, caption and the date line don't).
+Everything passes ir.validate(): ASCII only and nothing Writer's AutoCorrect would rewrite
+while typing.
 """
 
 import datetime
+import json
 import os
 import re
 
 import numpy as np
 
 from research import ir
-from research.ir import Bullets, Document, Heading, Paragraph, Run, Subtitle, Title
+from research.ir import Bullets, Caption, Document, Heading, Paragraph, Run, Subtitle, Table, Title
 from research.project import WritingProject
 from research.textutil import slugify
+from spreadsheet_ops import money
 
 RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs", "normal")
 KINDS = ("status report", "meeting notes", "project proposal", "memo")
@@ -473,9 +480,40 @@ def paragraph_sizes(n, rng):
     return sizes
 
 
-def generate_office_doc(rng, n_sentences=25, kind=None, today=None):
+BUDGET_MIN_SENTENCES = 6              # shorter documents leave the spending section out
+BUDGET_HEADINGS = {"status report": ["Spending This Month", "Budget"], "meeting notes": ["Budget Update"],
+                   "project proposal": ["Costs So Far", "Budget"], "memo": ["Spending Update", "Budget"]}
+BUDGET_TOTALS = ["Spending on the {p} came to {t} in {m}.", "We spent {t} on the {p} in {m}.",
+                 "The {p} cost {t} in {m}."]
+BUDGET_TOPS = ["{c} was the largest share at {a}, mostly the {i}.",
+               "The biggest category was {c} at {a}, mainly the {i}."]
+BUDGET_POINTERS = ["The breakdown by category is in the table below.",
+                   "The table below shows each category from the budget sheet.",
+                   "Each category is listed in the table below."]
+
+
+def budget_section(ctx, kind, budget, n):
+    """The spending section (n = 2 or 3 sentences): the month's total (in bold), the biggest
+    category, sometimes a pointer to the table, then a caption and the summary table copied from
+    the budget sheet (its source range)."""
+    t = "$" + money(budget.total)
+    cat, cents, item = budget.top
+    lead, tail = ctx.pick(BUDGET_TOTALS).split("{t}")
+    sentences = [ctx.pick(BUDGET_TOPS).format(c=cat, a="$" + money(cents), i=item.lower())]
+    if n > 2:
+        sentences.append(ctx.pick(BUDGET_POINTERS))
+    runs = [Run(lead.format(p=ctx.project)), Run(t, bold=True),
+            Run(tail.format(p=ctx.project, m=budget.month) + " " + " ".join(sentences))]
+    return [Heading(ctx.pick(BUDGET_HEADINGS[kind]), 1), Paragraph(runs),
+            Caption(f"Table 1. Spending by category in {budget.month}"),
+            Table(budget.summary_rows, header=True, source=budget.summary_range)]
+
+
+def generate_office_doc(rng, n_sentences=25, kind=None, today=None, budget=None):
     """An office document (ir.Document) with exactly n_sentences sentences; meta records its
-    kind, title and the structure of every sentence."""
+    kind, title and the structure of every sentence. budget: a spreadsheet_ops.Budget - the
+    document then has a spending section before its last one (when it has at least
+    BUDGET_MIN_SENTENCES sentences), its table pasted from the budget sheet."""
     if n_sentences < 1:
         raise ValueError("n_sentences must be at least 1")
     today = today or datetime.date.today()
@@ -483,6 +521,9 @@ def generate_office_doc(rng, n_sentences=25, kind=None, today=None):
     kind = kind or KINDS[int(rng.integers(len(KINDS)))]
     maker = SentenceMaker(ctx)
     title = make_title(ctx, kind)
+    n_budget = 0
+    if budget is not None and n_sentences >= BUDGET_MIN_SENTENCES:
+        n_budget = 3 if n_sentences >= 12 and rng.random() < 0.6 else 2
     blocks = [Title(title, size=float(rng.choice(TITLE_SIZES)) if rng.random() < 0.6 else None)]
     if rng.random() < 0.7:                     # a date line under the title
         date = f"{today.day} {today.strftime('%B %Y')}"
@@ -490,11 +531,15 @@ def generate_office_doc(rng, n_sentences=25, kind=None, today=None):
                          f"Last updated {date}", f"Draft for discussion, {date}"])
         blocks.append(Subtitle(line) if rng.random() < 0.5 else Paragraph([Run(line)], align="center", size=10))
 
-    n_sections = 1 if n_sentences < 4 else 2 if n_sentences < 9 else int(rng.integers(2, 5))
+    n_body = n_sentences - n_budget
+    n_sections = 1 if n_body < 4 else 2 if n_body < 9 else int(rng.integers(2, 5))
     headings = pick_headings(ctx, kind, n_sections)
-    counts = split_counts(n_sentences, len(headings), rng)
+    counts = split_counts(n_body, len(headings), rng)
+    budget_at = max(1, len(headings) - 1)     # the spending section goes before the last one
     doc_name_used = False
-    for heading, count in zip(headings, counts):
+    for k, (heading, count) in enumerate(zip(headings, counts)):
+        if n_budget and k == budget_at:
+            blocks += budget_section(ctx, kind, budget, n_budget)
         blocks.append(Heading(heading, 1))
         left = count
         if re.search(r"Decision|Recommendation|Summary|Purpose", heading) and left >= 3 and rng.random() < 0.5:
@@ -522,8 +567,12 @@ def generate_office_doc(rng, n_sentences=25, kind=None, today=None):
                 blocks.append(paras.pop(0))
             blocks.append(bullets)
         blocks += paras
+    if n_budget and budget_at >= len(headings):   # a one-section document: the spending section last
+        blocks += budget_section(ctx, kind, budget, n_budget)
+    maker.count += n_budget
+    maker.kinds += ["budget"] * n_budget
     doc = Document(blocks, meta={"kind": kind, "title": title, "sentences": maker.count, "structures": maker.kinds,
-                                 "project": ctx.project})
+                                 "project": ctx.project, "budget": budget.summary_range if n_budget else None})
     problems = ir.validate(doc)
     if problems:
         raise ValueError(f"Generated document is not safe to type: {problems[:3]}")
@@ -552,12 +601,21 @@ class OfficeProject(WritingProject):
     tasks.Workspace.write() like the research paper, saved as '<title>.odt' in
     runs/normal/<title>-<time>/ (with outline.json, paper.md, progress.json)."""
 
-    def __init__(self, human, n_sentences=25, kind=None, folder=None, revisions="heuristic", log=print):
-        paper = generate_office_doc(human.rng, n_sentences, kind)
+    def __init__(self, human, n_sentences=25, kind=None, folder=None, revisions="heuristic", log=print,
+                 budget=None):
+        """budget: a spreadsheet_ops.Budget the document reports on (its spending section and
+        table); kept in budget.json, with the sheet saved next to the document (sheet_path)."""
+        paper = generate_office_doc(human.rng, n_sentences, kind, budget=budget)
         title = paper.meta["title"]
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
         folder = os.path.abspath(folder or os.path.join(RUNS_DIR, f"{slugify(title)}-{stamp}"))
         super().__init__(human, folder, os.path.join(folder, file_name(title) + ".odt"), revisions=revisions, log=log)
+        self.budget = budget
+        self.sheet_path = os.path.join(folder, f"{budget.month} Budget.ods") if budget is not None else None
+        self.notes_path = os.path.join(folder, "notes.txt")
+        if budget is not None:
+            with open(os.path.join(folder, "budget.json"), "w", encoding="utf-8") as f:
+                json.dump(budget.to_dict(), f, indent=1)
         self.set_paper(paper)
         log(f"Document to write: {paper.meta['kind']} {title!r} - {paper.meta['sentences']} sentences, "
             f"{paper.word_count()} words, about {self.remaining_seconds() / 60:.1f} min of typing "

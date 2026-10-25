@@ -22,16 +22,29 @@ it - formatted with a shortcut or the toolbar, and the caret is put back at the 
 (Ctrl+End / End). Nothing is ever typed while text is selected. A selection's font size is
 set with Ctrl+] / Ctrl+[ (checked against the Font Size box) or the Font Size box.
 
+A table copied from the Calc spreadsheet (paste_table, see op_paste_table) is pasted as plain text and turned
+into a table with Table > Convert > Text to Table, instead of being typed cell by cell.
+
 Text is typed with the learned typing model (typos, corrections, thinking pauses), one
 run at a time, so its corrections never cross a formatting boundary. When Writer's word
 completion offers the rest of a long word after a run, it is dismissed (Delete) before
 Enter could accept it.
 
-Where Writer exposes nothing to UI Automation (controller.writer.is_inaccessible) the
-executor works blind: shortcuts only, styles without a shortcut and font sizes from the
-boxes are left out (typing into a box that may not have the focus could replace the
-document), a selection is resized with Ctrl+] presses, word-completion suggestions are
-dismissed whenever one could be showing, and nothing is read back.
+Where Writer exposes nothing to UI Automation (controller.writer.is_inaccessible), the mouse is
+aimed from a screenshot instead (controller.writer_screen: the page, its lines of text, the menu
+bar): mouse people open menus by clicking their titles (checked: a menu window opens) and pick
+the entry by its letter, highlight the line just typed by dragging across it or triple-clicking
+it (checked: the line is tinted with the highlight's blue - otherwise Ctrl+End and the keys),
+move over dialogs while reading them, and while typing the mouse now and then drifts to the
+text and rests there. Styles without a shortcut (Title, Subtitle, Caption) and font sizes go
+through the Apply Style and Font Size boxes, found on the screenshot too: clicked, Ctrl+A, and
+typed into only once a fresh screenshot shows the box's own text highlighted (Ctrl+A in the
+page would select the whole document, and typing would replace it - then Esc, Ctrl+End and the
+step is left out). Highlighted text is resized through the Font Size box as well: Writer 4.1
+has no Ctrl+] / Ctrl+[ shortcut, so those steps only work where a keyboard map adds them and the
+box can be read back. The toolbar's buttons are icons and stay out of reach: otherwise blind
+means shortcuts, word-completion suggestions are dismissed whenever one could be showing, and
+nothing is read back.
 
 dry_run=True performs nothing and records the actions it would take (self.actions).
 """
@@ -44,6 +57,7 @@ from collections import Counter
 from algorithms.session import TaskError
 from controller import apps
 from controller import writer as W
+from controller import writer_screen as WS
 
 from .fake_writer import FakeWriter
 from .writer_ops import BODY, NEXT_STYLE, START_STYLE, Op
@@ -56,6 +70,7 @@ TOGGLES = {"bold": ("Bold", "b"), "italic": ("Italic", "i")}       # toolbar but
 ALIGN = {"center": ("Cent(red|ered)", "e"), "left": ("Align Left", "l")}
 BULLETS_BUTTON = "Bullets On/Off"
 P_SAVE_AT_SECTION = 0.6                                  # chance of saving when a section is done (after Save As)
+P_DRIFT = 0.3                                            # chance the mouse drifts to the text before a run is typed
 
 
 class WriterExecutor:
@@ -65,7 +80,7 @@ class WriterExecutor:
     how each operation was done (methods) and what went wrong (problems) for the log."""
 
     def __init__(self, human, win, doc, save_path=None, refocus=None, log=print, dry_run=False,
-                 revisions="heuristic", saved=False):
+                 revisions="heuristic", saved=False, paste_source=None):
         """
         win, doc:   the Writer window and its DocumentControl (None in a dry run)
         revisions:  how the typing model revises composed text (passed to human.type)
@@ -73,16 +88,21 @@ class WriterExecutor:
         refocus:    callback that puts the keyboard focus back into the document (e.g.
                     tasks.click_into_document); a TaskError is raised if focus can't be had
         saved:      the document already has its file name (resuming)
+        paste_source: callback(range, rows) that copies a spreadsheet range to the clipboard
+                    and comes back to Writer, returning the copied text ('' if it couldn't;
+                    tasks.Workspace.sheet_to_clipboard); None: tables with a source are typed
         """
         self.human, self.win, self.doc = human, win, doc
         self.save_path, self.refocus, self.log = save_path, refocus, log
         self.dry_run, self.revisions, self.saved = dry_run, revisions, saved
+        self.paste_source = paste_source
         self.bold = self.italic = False
         self.style = START_STYLE               # paragraph style at the caret, as far as we know
         self.in_table = False
         self.style_checked = False             # the caret's paragraph style was compared with Writer's
         self.skipping_table = False
         self.selecting = False                 # text is highlighted (between select and deselect)
+        self.last_select = None                # the select op of that highlight
         self.long_words = set()                # words of 8+ letters typed (Writer's word completion offers them)
         self.actions = []                      # dry run: what would have been done
         self.methods = Counter()               # how each kind of operation was done (for the log)
@@ -236,15 +256,23 @@ class WriterExecutor:
         time.sleep(0.2)
         return True
 
-    def _menu_click(self, menu_name, item_name, label):
+    def _menu_click(self, menu_name, item_name, label, keys=None):
         """Open a menu ('Insert') and click one of its items (regex, e.g. 'Table\\.\\.\\.').
-        False if either can't be found (an opened menu is closed again)."""
+        Where Writer shows UI Automation no menus: click the menu's title where the screenshot
+        shows it and press the item's letter(s) `keys`. False if either can't be found (an
+        opened menu is closed again)."""
         if self.dry_run:
             self.actions.append(f"CLICK {menu_name} > {label}")
             return True
         menu = W.menu(self.win, menu_name)
         if menu is None:
-            return False
+            if not keys or not self._click_menu_title(menu_name):
+                return False
+            self._think("glance", 0.6)            # finding the item in the list
+            for key in keys:
+                self._press(key)
+                time.sleep(0.3)
+            return True
         self.human.click_element(menu)
         time.sleep(0.4)                           # the menu opening
         item = W.menu_item(menu, item_name)
@@ -255,6 +283,116 @@ class WriterExecutor:
         self.human.click_element(item)
         return True
 
+    # --- the mouse, aimed from a screenshot (where UIA shows nothing) --------------------------------
+
+    def _view(self):
+        """The Writer window as a screenshot shows it (controller.writer_screen.View), or None."""
+        if self.dry_run or self.win is None:
+            return None
+        try:
+            return WS.read_view(self.win.NativeWindowHandle)
+        except Exception as exc:                  # a capture failing is no reason to stop
+            self.log(f"Couldn't read Writer's window from the screen ({type(exc).__name__}: {exc})")
+            return None
+
+    def _click_menu_title(self, name):
+        """Click a menu's title on the menu bar (found on a screenshot); True once a menu window
+        has opened (it is closed again with Esc if something else happened)."""
+        if self.dry_run or name not in WS.MENUS:
+            return False
+        view = self._view()
+        if view is None or len(view.menu_titles) != len(WS.MENUS):
+            return False
+        before = set(apps.top_level_windows())
+        self.human.click_rect(view.menu_rect(WS.MENUS.index(name)))
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            if any(apps.window_class(h).startswith("SAL") for h in set(apps.top_level_windows()) - before):
+                time.sleep(0.25)
+                self.methods["menu:title_click"] += 1
+                return True
+            time.sleep(0.1)
+        self.log(f"Clicking '{name}' didn't open its menu")
+        self._press("esc")
+        return False
+
+    def _drift(self):
+        """Before a run is typed (chance P_DRIFT, mouse people more often): the mouse drifts to
+        where the person is looking - just after the last line of text, or a little below it -
+        and rests there. Only where UIA shows nothing (else the caret is followed by UIA reads
+        and the mouse stays as it was)."""
+        if self.dry_run or not self.blind or self.selecting:
+            return
+        if self.human.rng.random() >= P_DRIFT * (1.5 if not self._keyboard() else 0.7):
+            return
+        view = self._view()
+        line = view.last_line if view is not None else None
+        if line is None:
+            return
+        l, t, r, b = line
+        pl, _, pr, bottom = view.page
+        rng = self.human.rng
+        if rng.random() < 0.6:                    # just after the end of the text
+            x, y = r + rng.uniform(20, 220), rng.uniform(t, b)
+        else:                                     # a little below it, where the next words will go
+            x, y = rng.uniform(l, max(l + 1, min(r, pr - 40))), b + rng.uniform(10, 60)
+        x, y = min(max(x, pl + 10), pr - 10), min(y, bottom - 10)
+        self.human.move_to(int(x), int(y))
+        self.methods["mouse:drift"] += 1
+
+    def _box_by_screen(self, which, text):
+        """Writer shows UIA nothing: click the Apply Style box ('style') or the Font Size box
+        ('size') where the screenshot shows it, Ctrl+A, and only if a fresh screenshot shows the
+        box's own text highlighted type `text`, Enter, then Esc back to the page. Anything else
+        means the keys reached the page - Ctrl+A there selects the whole document - so Ctrl+End
+        (back to the end, nothing selected) and False; nothing is typed. With text highlighted
+        (a size for it) the click leaves that highlight alone and the size applies to it; after
+        a miss it is highlighted again by keys (_reselect), so what follows still has it."""
+        if self.dry_run:
+            return False
+        view = self._view()
+        rect = None if view is None else (view.style_box if which == "style" else view.size_box)
+        if rect is None:
+            return False
+        l, t, r, b = rect
+        self.human.click_rect((l + 6, t + (b - t) // 4, l + max(12, min(70, (r - l) // 2)), b - (b - t) // 4))
+        time.sleep(0.3)
+        self._hotkey("ctrl", "a")
+        time.sleep(0.3)
+        rgb, offset = WS.capture(self.win.NativeWindowHandle)
+        if not WS.highlighted(rgb, rect, offset):
+            self.log(f"The {'Apply Style' if which == 'style' else 'Font Size'} box didn't take the focus "
+                     f"- back to the page, nothing typed")
+            self._press("esc")                    # out of the box, if it did take the focus after all
+            time.sleep(0.2)
+            self._hotkey("ctrl", "end")           # in the page: nothing selected, the caret at the end
+            if self.selecting:
+                self._reselect()
+            self.methods[f"{which}:box_screen_missed"] += 1
+            return False
+        self._think("glance")
+        self._type(text, "transcribe", exact=True)
+        self._think("confirm")
+        self._press("enter")
+        time.sleep(0.4)
+        self._press("esc")                        # back to the page if the box kept the focus
+        time.sleep(0.2)
+        self.methods[f"{which}:box_screen"] += 1
+        return True
+
+    def _look_at_dialog(self):
+        """Mouse people move the mouse over the dialog in front while reading it (its window rect
+        is plain Win32, so this works where nothing inside it can be found)."""
+        if self.dry_run or self._keyboard(0.2):
+            return
+        from controller.calc_screen import window_rect
+        l, t, r, b = window_rect(apps.foreground_top_level())
+        if r - l > 60 and b - t > 60:
+            rng = self.human.rng
+            self.human.move_to(int(rng.uniform(l + (r - l) * 0.3, r - (r - l) * 0.3)),
+                               int(rng.uniform(t + (b - t) * 0.3, b - (b - t) * 0.3)))
+            self.methods["mouse:dialog"] += 1
+
     # --- operations ------------------------------------------------------------------------------
 
     def op_type(self, op):
@@ -264,6 +402,7 @@ class WriterExecutor:
         self.ensure_focus()
         if not self.dry_run and not self.style_checked and not self.in_table:
             self._check_style()
+        self._drift()
         self._type(op.a, op.b)
         if not self.dry_run:
             self._dismiss_completion(op.a)
@@ -367,7 +506,7 @@ class WriterExecutor:
     def _page_break_by_menu(self):
         """Insert > Manual Break..., make sure 'Page break' is chosen, OK. False if the
         menu item or the dialog isn't found."""
-        if not self._menu_click("Insert", r"Manual Break\.\.\.", "Manual Break..."):
+        if not self._menu_click("Insert", r"Manual Break\.\.\.", "Manual Break...", keys="b"):
             return False
         if self.dry_run:
             self.actions.append("CLICK Page break, OK")
@@ -376,6 +515,7 @@ class WriterExecutor:
         if dialog is None:
             self._press("esc")
             return False
+        self._look_at_dialog()
         self._think("scan", 0.6)
         page = W.dialog_control(dialog, r"Page break|Page Break", "RadioButtonControl")
         if page is not None and not W.is_checked(page):
@@ -432,8 +572,19 @@ class WriterExecutor:
                 self.human.hotkey_repeat("ctrl", "shift", "left", presses=op.a)
             how = "ctrl_shift_left"
         self.selecting = True
+        self.last_select = op                     # to highlight the same text again if needed (_reselect)
         self.methods[f"select:{how}"] += 1
         self._think("glance", 0.6)                # check the highlight
+
+    def _reselect(self):
+        """Highlight the text of the last select again, by keys, from the end of the document
+        (Shift+Home for a line, Ctrl+Shift+Left once per word)."""
+        op = self.last_select
+        if op.b == "line":
+            self._hotkey("shift", "home")
+        else:
+            self.human.hotkey_repeat("ctrl", "shift", "left", presses=op.a)
+        self.methods["select:again"] += 1
 
     def _select_line_by_mouse(self):
         """Drag from the left of the paragraph's line to past its end, or triple-click on it;
@@ -443,17 +594,31 @@ class WriterExecutor:
             self.actions.append("DRAG across the line" if drag else "TRIPLE-CLICK the line")
             return "drag" if drag else "triple_click"
         rect = W.end_paragraph_rect(self.doc)
-        if rect is None:
-            return None
+        from_screen = rect is None
+        if from_screen:                           # Writer shows UIA nothing: the last line on screen
+            view = self._view()
+            rect = view.last_line if view is not None else None
+            if rect is None:
+                return None
         l, t, r, b = rect
         y = t + min((b - t) / 2, 18)              # the first line of the paragraph
         rng = self.human.rng
         if drag:
             self.human.drag((l + rng.uniform(2, 10), y + rng.normal(0, 1.5)),
                             (r - rng.uniform(2, 15), y + rng.normal(0, 1.5)))
-            return "drag"
-        self.human.multi_click_rect((l + (r - l) * 0.3, y - 3, l + (r - l) * 0.6, y + 3), 3)
-        return "triple_click"
+        else:
+            self.human.multi_click_rect((l + (r - l) * 0.3, y - 3, l + (r - l) * 0.6, y + 3), 3)
+        how = "drag" if drag else "triple_click"
+        if from_screen:
+            time.sleep(0.35)
+            rgb, offset = WS.capture(self.win.NativeWindowHandle)
+            if not WS.selected(rgb, rect, offset):
+                self.log(f"The {how} didn't highlight the line - back to the end, and the keys")
+                self._hotkey("ctrl", "end")           # wherever the click put the caret
+                self.methods[f"select:{how}_missed"] += 1
+                return None
+            how += "_screen"
+        return how
 
     def op_deselect(self, op):
         """Put the caret back at the end of the text: Ctrl+End (End for a line). The caret
@@ -478,11 +643,11 @@ class WriterExecutor:
         self.style = style
         self.style_checked = True
         keys = STYLE_KEYS.get(style)                 # None: the style has no shortcut
-        if self.blind:                               # only a shortcut is safe without seeing the boxes
-            if keys:
+        if self.blind:                               # the box only where the screenshot shows it (_box_by_screen)
+            if keys and (self._keyboard(0.2) or not self._box_by_screen("style", style)):
                 self._hotkey(*keys)
                 self.methods["style:keys_blind"] += 1
-            else:
+            elif not keys and not self._box_by_screen("style", style):
                 self.problems.append(f"style {style!r} left out (Writer not accessible)")
             return
         if self._keyboard(0.2):
@@ -550,10 +715,11 @@ class WriterExecutor:
         keyboard (Ctrl+F11 to the Apply Style box, Tab, Tab). Checked against the size
         Writer reports at the caret."""
         pt = f"{op.a:g}"                           # 12.0 -> '12', 10.5 -> '10.5'
-        if self.selecting and (self.blind or self._keyboard(0.1)) and self._size_by_steps(op.a):
+        if self.selecting and not self.blind and self._keyboard(0.1) and self._size_by_steps(op.a):
             return
-        if self.blind:                           # the boxes can't be confirmed to have the focus
-            self.problems.append(f"font size {pt} left out (Writer not accessible)")
+        if self.blind:                           # the Font Size box where the screenshot shows it
+            if not self._box_by_screen("size", pt):
+                self.problems.append(f"font size {pt} left out (Writer not accessible)")
             return
         if self._keyboard(0.1):
             done = self._size_by_keys(pt) or self._size_by_box(pt)
@@ -574,13 +740,6 @@ class WriterExecutor:
         if self.dry_run:
             self.actions.append("HOTKEY ctrl+] (until the size shows)")
             self.methods["size:steps"] += 1
-            return True
-        if self.blind:                           # can't read the size: a few steps the right way
-            steps = int(min(6, max(1, round(abs(target - 12.0) / 3.5))))
-            for _ in range(steps):
-                self._hotkey("ctrl", "]" if target > 12.0 else "[")
-                time.sleep(0.2)
-            self.methods["size:steps_blind"] += 1
             return True
         size = W.caret_font_size(self.win)
         for _ in range(6):
@@ -709,7 +868,7 @@ class WriterExecutor:
 
     def _table_by_menu(self):
         """Insert > Table... - the Insert Table dialog."""
-        if not self._menu_click("Insert", r"Table\.\.\.", "Table..."):
+        if not self._menu_click("Insert", r"Table\.\.\.", "Table...", keys="t"):
             return None
         return self._wait_table_dialog()
 
@@ -718,6 +877,8 @@ class WriterExecutor:
         if self.dry_run:
             return True
         dialog = W.find_dialog("Insert Table", timeout=3)
+        if dialog is not None:
+            self._look_at_dialog()
         if dialog is None:
             self._press("esc")                    # leave a menu that may still be open
         return dialog
@@ -749,6 +910,119 @@ class WriterExecutor:
             return True
         in_table = W.caret_in_table(self.doc)
         return bool(in_table) or (in_table is None and (W.table_count(self.doc) or 0) > before)
+
+    # --- a table pasted from the spreadsheet ---------------------------------------------------------------
+
+    def op_paste_table(self, op):
+        """Copy the spreadsheet range op.a (rows op.b) and paste it in as a table: Paste
+        Unformatted Text (tabs between cells, a paragraph per row; with a line break after the
+        last row the caret lands in an empty paragraph after them - without one, Enter makes
+        it), highlight the rows (Left, then
+        Shift+Up once per row and Shift+Home), Table > Convert > Text to Table... with Tabs as
+        the separator, OK, and Ctrl+End to the paragraph after the table. The typed table's
+        operations that follow are then skipped (skipping_table). If the range can't be copied
+        nothing is pasted and the table is typed; if the conversion dialog doesn't open the
+        figures stay in as text (not typed a second time)."""
+        if self.paste_source is None:
+            return
+        self.ensure_focus()
+        if self.dry_run:
+            self.actions.append(f"COPY Calc {op.a}; PASTE unformatted; select {len(op.b)} rows; "
+                                f"Table > Convert > Text to Table")
+            self.paste_source(op.a, [list(r) for r in op.b])
+            self.methods["paste_table"] += 1
+            self.skipping_table = True
+            return
+        before = 0 if self.blind else W.table_count(self.doc) or 0
+        copied = self.paste_source(op.a, [list(r) for r in op.b])
+        if not copied:
+            self.log("Couldn't copy the figures from the spreadsheet - typing the table instead")
+            return
+        self.ensure_focus()                       # back from Calc (a click into the page ends with Ctrl+End)
+        how = self._paste_unformatted()
+        time.sleep(0.6)
+        self._think("glance")
+        if not copied.endswith(("\n", "\r")):     # no line break after the last row: make the paragraph
+            self._press("enter")                  # that follows the table
+        self._press("left")                       # from the empty paragraph to the end of the last row
+        if len(op.b) > 1:
+            self.human.hotkey_repeat("shift", "up", presses=len(op.b) - 1)
+        self._hotkey("shift", "home")
+        self._think("glance", 0.6)                # check the highlight
+        self.skipping_table = True                # from here on the figures are in the document
+        if not self._text_to_table():
+            self._press("esc")
+            self._hotkey("ctrl", "end")
+            self.problems.append("pasted figures left as text (Convert Text to Table didn't open)")
+            return
+        self.in_table = True
+        self.op_exit_table(Op("exit_table"))
+        if not self.blind and (W.table_count(self.doc) or 0) <= before:
+            self.problems.append("no new table after Convert Text to Table")
+        self.methods[f"paste_table:{how}"] += 1
+
+    def _paste_unformatted(self):
+        """Paste the clipboard as plain text: Ctrl+Alt+Shift+V, or Edit > Paste Special... >
+        'Unformatted text' > OK. The way used."""
+        if not self._keyboard(0.1) and self._menu_click("Edit", r"Paste Special\.\.\.", "Paste Special..."):
+            dialog = W.find_dialog(r"Paste Special", timeout=3)
+            item = W.dialog_control(dialog, r"Unformatted text", "ListItemControl") if dialog is not None else None
+            if item is not None:
+                self._think("scan", 0.6)
+                self.human.click_element(item)
+                self._think("confirm")
+                self._press("enter")
+                return "paste_special"
+            self._press("esc")                    # no dialog, or the format isn't listed
+            time.sleep(0.3)
+        self._hotkey("ctrl", "alt", "shift", "v")
+        return "key"
+
+    def _text_to_table(self):
+        """Table > Convert > Text to Table... (clicked, or Alt+A, C, T), Tabs as the separator,
+        OK. False if the dialog doesn't open."""
+        clicked = False
+        if not self._keyboard(0.1):
+            menu = W.menu(self.win, "Table")
+            if menu is None and self._click_menu_title("Table"):
+                for key in ("c", "t"):            # ~Convert > ~Text to Table...
+                    time.sleep(0.35)
+                    self._press(key)
+                clicked = True
+            elif menu is not None:
+                self.human.click_element(menu)
+                time.sleep(0.4)
+                convert = W.menu_item(menu, r"Convert")
+                if convert is not None:
+                    self._think("glance", 0.6)
+                    self.human.click_element(convert)
+                    time.sleep(0.4)
+                    item = W.menu_item(convert, r"Text to Table\.\.\.")
+                    if item is not None:
+                        self.human.click_element(item)
+                        clicked = True
+                if not clicked:
+                    self._press("esc", presses=2)
+                    time.sleep(0.3)
+        if not clicked:
+            self._hotkey("alt", "a")              # T~able > ~Convert > ~Text to Table...
+            time.sleep(0.4)
+            self._press("c")
+            time.sleep(0.3)
+            self._press("t")
+        dialog = W.find_dialog(r"Convert Text to Table", timeout=3)
+        if dialog is None:
+            return False
+        self._look_at_dialog()
+        self._think("scan", 0.7)
+        if not self.blind:
+            tabs = W.dialog_control(dialog, r"Tabs", "RadioButtonControl")
+            if tabs is not None and not W.is_checked(tabs):
+                self.human.click_element(tabs)
+        self._think("confirm")
+        self._press("enter")
+        time.sleep(0.6)
+        return True
 
     # --- saving -----------------------------------------------------------------------------------
 

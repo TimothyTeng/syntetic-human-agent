@@ -903,6 +903,55 @@ def open_writer_document(human, retry=True):
     return win, doc
 
 
+CALC_APP = "openoffice calc"               # its Start-menu name
+
+
+def open_calc(human):
+    """Open OpenOffice Calc from the Start menu (the Run dialog's scalc if Start search doesn't
+    bring it up) on a new spreadsheet; returns the NEW window - spreadsheets that were already
+    open are never touched. OpenOffice's start-up dialogs are dealt with as for Writer."""
+    from spreadsheet_exec import is_calc_window
+    before = set(apps.top_level_windows(W.WINDOW_CLASS))
+    log("Opening OpenOffice Calc")
+    human.open_app(CALC_APP)
+    win = _foreground_calc(human, before, config.APP_START_TIMEOUT)
+    if win is None:
+        log("Calc didn't open from Start search - trying the Run dialog")
+        fg = apps.foreground_top_level()
+        if fg and fg not in before and apps.window_class(fg) == W.WINDOW_CLASS and not is_calc_window(fg):
+            close_stray_window(human, fg)          # another OpenOffice program opened instead
+        else:
+            human.press("esc")
+        time.sleep(0.5)
+        if human.run_command("scalc"):
+            win = _foreground_calc(human, before, config.APP_START_TIMEOUT)
+    if win is None:
+        raise TaskError("A new OpenOffice Calc window did not appear")
+    time.sleep(1.5)                            # the toolbars and the grid need a moment to settle
+    human.place_new_window(win.NativeWindowHandle)
+    time.sleep(0.5)
+    return win
+
+
+def _foreground_calc(human, ignore, timeout):
+    """The Calc window in front that isn't in `ignore`, as a UIA control, or None on timeout."""
+    from spreadsheet_exec import is_calc_window
+    deadline = time.time() + timeout
+    handled = set()
+    while time.time() < deadline:
+        kind, dialog = startup_dialog()
+        if dialog and dialog not in handled:
+            handled.add(dialog)
+            finish_startup_dialog(human, kind, dialog)
+        hwnd = apps.foreground_top_level()
+        if hwnd and hwnd not in ignore and is_calc_window(hwnd):
+            win = apps.control_for(hwnd)
+            if win is not None:
+                return win
+        time.sleep(0.25)
+    return None
+
+
 def _window_process(hwnd):
     """psutil.Process of a window's program, or None."""
     import psutil
@@ -982,8 +1031,8 @@ def wait_for_exit(proc, timeout=None):
 
 WRITER_NOT_ACCESSIBLE = (
     "Writer doesn't show its document to UI Automation (OpenOffice's accessibility bridge didn't start - "
-    "`python -m tools.preflight` checks it). Writing on by keyboard without read-back checks; styles "
-    "without a shortcut and font sizes are left out.")
+    "`python -m tools.preflight` checks it). Writing on without read-back checks; the mouse, the "
+    "menus and the Apply Style / Font Size boxes are found on screenshots instead.")
 
 
 def find_document_area(win, mark=True):
@@ -1027,14 +1076,14 @@ def reopen_writer_document(human, path):
     raise TaskError(f"Couldn't open {path} in Writer")
 
 
-def close_writer(human, win, p_close_start_center=1.0):
+def close_writer(human, win, p_close_start_center=1.0, app="Writer"):
     """Close the Writer document window the way this person does - File > Close, the window's
     Close button, Ctrl+W, or (when no other OpenOffice window is open) quitting with Ctrl+Q /
     File > Exit. A 'Save changes?' question is answered with Save. If closing the last
     document leaves OpenOffice's Start Center up, it is closed too: OpenOffice 4.1 only shows
     UI Automation the first window of a running OpenOffice, so a Start Center left open would
     make the next run's Writer window unreadable. Windows that were open before are never
-    closed. True once the document window is gone."""
+    closed. app: 'Calc' closes a Calc window the same way. True once the document window is gone."""
     user32 = ctypes.windll.user32
     hwnd = win.NativeWindowHandle
     if not user32.IsWindow(hwnd):
@@ -1047,7 +1096,7 @@ def close_writer(human, win, p_close_start_center=1.0):
     keyboard = human.prefers_keyboard()
     if keyboard:
         keys = ("ctrl", "q") if not others and human.rng.random() < 0.4 else ("ctrl", "w")
-        log(f"Closing Writer ({'+'.join(k.capitalize() for k in keys)})")
+        log(f"Closing {app} ({'+'.join(k.capitalize() for k in keys)})")
         if apps.foreground_window() == hwnd:
             human.hotkey(*keys)
     else:
@@ -1059,7 +1108,7 @@ def close_writer(human, win, p_close_start_center=1.0):
             time.sleep(0.4)
             entry = W.menu_item(menu, item)
             if entry is not None:
-                log(f"Closing Writer (File > {item})")
+                log(f"Closing {app} (File > {item})")
                 human.think("glance", 0.6)
                 human.click_element(entry)
                 done = True
@@ -1068,26 +1117,27 @@ def close_writer(human, win, p_close_start_center=1.0):
         if not done:
             button = ui_elements.find_element(win, "Close", "ButtonControl", timeout=1, search_depth=4)
             if button is not None and ui_elements.is_visible(button):
-                log("Closing Writer (the window's Close button)")
+                log(f"Closing {app} (the window's Close button)")
                 human.click_element(button)
             elif apps.foreground_window() == hwnd:
-                log("Closing Writer (Ctrl+W)")
+                log(f"Closing {app} (Ctrl+W)")
                 human.hotkey("ctrl", "w")
     deadline = time.time() + 10
     while time.time() < deadline:
         if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
             break
-        if not W.is_writer_window(hwnd):      # the last document closed: the same window is now the Start Center
+        if not apps.window_title(hwnd).endswith("OpenOffice " + app):   # the last document closed: the same
+            # window is now the Start Center
             break
         dialog = W.find_dialog(r".+", timeout=0)
         save = dialog and W.dialog_control(dialog, r"^Save$", "ButtonControl")
         if save:
-            log("Writer asks to save the changes - saving")
+            log(f"{app} asks to save the changes - saving")
             human.think("scan", 0.7)
             human.click_element(save)
         time.sleep(0.3)
     else:
-        log("Writer's window is still open")
+        log(f"{app}'s window is still open")
         return False
     time.sleep(1.0)
     fg = apps.foreground_top_level()          # closing the last document brings up the Start Center
@@ -1234,6 +1284,33 @@ def notepad_text(ctrl):
         return None
 
 
+def _note_text(ctrl):
+    """A Notepad editor's text with plain \\n line ends ('' if it can't be read)."""
+    return (notepad_text(ctrl) or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def copy_to_clipboard(human, timeout=2.0):
+    """Ctrl+C on what is selected; the text that lands on the clipboard ('' if nothing does).
+    The clipboard is emptied first, so old text is never mistaken for the copy."""
+    import pyperclip
+    try:
+        pyperclip.copy("")
+    except pyperclip.PyperclipException:
+        pass
+    human.hotkey("ctrl", "c")
+    deadline = time.time() + timeout
+    text = ""
+    while time.time() < deadline:
+        time.sleep(0.2)
+        try:
+            text = pyperclip.paste()
+        except pyperclip.PyperclipException:     # the clipboard is busy for a moment
+            continue
+        if text:
+            break
+    return text
+
+
 def notepad_editor_with_focus(win):
     """The focused editor control if `win` is in front and its editor has focus, else None."""
     if apps.foreground_window() != win.NativeWindowHandle:
@@ -1311,6 +1388,14 @@ NOTES = [
 ]
 
 
+# Normal mode's scratch note: links noted after some websites
+P_JOT_LINK = 0.45
+MAX_LINKS = 4
+LINK_HEADERS = ["Links to look at later", "Useful pages", "Read later"]
+LINK_REASONS = ["read later", "for the newsletter", "share with the team", "worth a proper look",
+                "send to the project board"]
+
+
 # --- Session activities ----------------------------------------------------------------------
 
 QUERIES = sites.searches()     # (query, site): searches on the allowed sites' own search pages
@@ -1371,6 +1456,10 @@ class Workspace:
         self.notepad = None              # window handle
         self.notepad_text = ""           # everything typed into our note so far
         self.note = 0                    # next note to write
+        self.calc_win = None             # normal mode: the budget sheet's Calc window
+        self.sheet_range = None          # ... and its summary range, once it is built
+        self.scratch = False             # normal mode: links go into a scratch note while browsing
+        self.links_jotted = 0
 
     def switch_to(self, hwnd):
         """Bring a window to the front: Alt+Tab if it is next in the switcher, else directly."""
@@ -1452,25 +1541,31 @@ class Workspace:
             return
         if self.project is not None and self.project.finished:
             raise TaskError("The document is finished")
-        if self.writer_win is not None and self._alive(self.writer_win.NativeWindowHandle) \
-                and self.back_to(self.writer_win.NativeWindowHandle):
-            self.writer_doc = W.document_control(self.writer_win) or self.writer_doc   # replaced after a save
-            if not W.document_has_focus(self.writer_win, self.writer_doc):
-                click_into_document(human, self.writer_win, self.writer_doc)
-        else:
-            project = self.project
-            if project is not None and project.saved and os.path.exists(project.doc_path):
-                # resuming a paper that was already saved: open that file, not a blank document
-                self.writer_win, self.writer_doc = reopen_writer_document(human, project.doc_path)
-            else:
-                self.writer_win, self.writer_doc = open_writer_document(human)
-            click_into_document(human, self.writer_win, self.writer_doc)
-            self.written_any = False
+        self.writer_window()
         if self.project is not None:                 # the next section of the paper / document
             self.project.write_next(self, seconds_left * 0.9)
             return
         text = self._next_chunk(seconds_left)
         type_into_document(human, self.writer_doc, text, self.revisions)
+
+    def writer_window(self):
+        """Bring this session's Writer document to the front with the caret in it, opening Writer
+        if there is none (the project's saved file when resuming, else a blank document)."""
+        human = self.human
+        if self.writer_win is not None and self._alive(self.writer_win.NativeWindowHandle) \
+                and self.back_to(self.writer_win.NativeWindowHandle):
+            self.writer_doc = W.document_control(self.writer_win) or self.writer_doc   # replaced after a save
+            if not W.document_has_focus(self.writer_win, self.writer_doc):
+                click_into_document(human, self.writer_win, self.writer_doc)
+            return
+        project = self.project
+        if project is not None and project.saved and os.path.exists(project.doc_path):
+            # resuming a paper that was already saved: open that file, not a blank document
+            self.writer_win, self.writer_doc = reopen_writer_document(human, project.doc_path)
+        else:
+            self.writer_win, self.writer_doc = open_writer_document(human)
+        click_into_document(human, self.writer_win, self.writer_doc)
+        self.written_any = False
 
     def review_document(self, seconds):
         """While writing: scroll back up through what is written and read it over for about
@@ -1561,30 +1656,161 @@ class Workspace:
 
     def notes(self, seconds_left):
         """Jot down a short note in Notepad (on a page of its own)."""
+        win, again = self._note_page()
+        self._jot(win, ("\n" if again else "") + NOTES[self.note % len(NOTES)])
+        self.note += 1
+
+    def _note_page(self):
+        """Our Notepad page in front with the caret at its end: (window, True) when it was there
+        already, (window, False) for a new empty page. TaskError if Notepad shows a note that
+        isn't ours."""
         human = self.human
         if self.notepad and self._alive(self.notepad) and self.back_to(self.notepad):
             win = auto.ControlFromHandle(self.notepad)
             ed = click_into_notepad(human, win)
-            current = (notepad_text(ed) or "").replace("\r\n", "\n").replace("\r", "\n")
-            if current.rstrip() != self.notepad_text.rstrip():
+            if _note_text(ed).rstrip() != self.notepad_text.rstrip():
                 raise TaskError("Notepad shows a different note than ours - not typing into it")
             human.hotkey("ctrl", "end")
-            prefix = "\n"
-        else:
-            win = open_notepad_note(human)
-            self.notepad, self.notepad_text, prefix = win.NativeWindowHandle, "", ""
-        text = prefix + NOTES[self.note % len(NOTES)]
-        self.note += 1
+            return win, True
+        win = open_notepad_note(human)
+        self.notepad, self.notepad_text = win.NativeWindowHandle, ""
+        return win, False
+
+    def _jot(self, win, text, paste=None):
+        """Type text at the end of our note; paste: text on the clipboard that is pasted
+        (Ctrl+V) first. The note is read back afterwards, and what it holds is what the next
+        jot checks against (a typo the typing model left in is part of our note too)."""
+        human = self.human
         human.think("mental", 0.6)
         if notepad_editor_with_focus(win) is None:
             raise TaskError("Notepad's editor lost keyboard focus - stopping before typing anything")
-        log(f"Writing a note ({len(text.split())} words)")
+        log(f"Writing a note ({len(((paste or '') + text).split())} words)")
+        if paste:
+            human.hotkey("ctrl", "v")
+            time.sleep(0.3)
         human.type_short(text)
-        self.notepad_text += text
+        meant = self.notepad_text + (paste or "") + text
         ed = notepad_editor_with_focus(win)
-        got = (notepad_text(ed) or "").replace("\r\n", "\n").replace("\r", "\n") if ed else None
-        log("Note text matches what was typed" if got is not None and got.rstrip() == self.notepad_text.rstrip()
+        got = _note_text(ed) if ed else None
+        log("Note text matches what was typed" if got is not None and got.rstrip() == meant.rstrip()
             else "Couldn't confirm the note's text")
+        self.notepad_text = got if got is not None else meant
+
+    # --- normal mode: the scratch note and the budget sheet ------------------------------------
+
+    def jot_link(self):
+        """After a website: now and then copy the address of the page in front (the address
+        bar, Ctrl+C) and paste it into the scratch note with a word on why, then go back to
+        Chrome. The next website is typed into the address bar, so the focus left there does
+        no harm. True if a link was noted."""
+        human = self.human
+        if not self.scratch or self.links_jotted >= MAX_LINKS or human.rng.random() > P_JOT_LINK \
+                or not (self._alive(self.chrome) and apps.foreground_window() == self.chrome):
+            return False
+        log("Noting down the page's address")
+        if not human.focus_address_bar():
+            return False
+        human.think("glance")
+        url = copy_to_clipboard(human)
+        human.press("esc")
+        if not url or not url.startswith("http") or "\n" in url:
+            log("Couldn't copy the address")
+            return False
+        win, again = self._note_page()
+        head = "" if again else str(human.rng.choice(LINK_HEADERS)) + "\n"
+        if head:
+            self._jot(win, head)
+        self._jot(win, (" - " + str(human.rng.choice(LINK_REASONS)) if human.rng.random() < 0.6 else "") + "\n",
+                  paste=url)
+        self.links_jotted += 1
+        self.back_to(self.chrome)
+        return True
+
+    def jot(self, text):
+        """Add a line to the scratch note (opened on an empty page if there is none yet)."""
+        win, again = self._note_page()
+        self._jot(win, ("\n" if again and not self.notepad_text.endswith("\n") else "") + text + "\n")
+
+    def save_note(self, path):
+        """Save the scratch note to `path` (Save As, Ctrl+Shift+S) and close its page (Ctrl+W:
+        a tab of its own in Windows 11 Notepad; classic Notepad closes the window). False if
+        there is no note."""
+        human = self.human
+        if not (self.notepad and self._alive(self.notepad) and self.back_to(self.notepad)):
+            return False
+        win = auto.ControlFromHandle(self.notepad)
+        click_into_notepad(human, win)
+        human.think("mental", 0.6)
+        human.save_as(path, ("ctrl", "shift", "s"))
+        deadline = time.time() + 10
+        while not os.path.exists(path) and time.time() < deadline:
+            time.sleep(0.3)
+        if not os.path.exists(path):
+            log("The note doesn't seem to have been saved - leaving Notepad open")
+            return False
+        log(f"Saved the note as {path}")
+        name = os.path.basename(path)
+        human.hotkey("ctrl", "w")
+        time.sleep(1.0)
+        if self._alive(self.notepad) and apps.window_title(self.notepad).startswith(name):
+            human.hotkey("alt", "f4")                       # classic Notepad: no tabs
+        self.notepad, self.notepad_text = None, ""
+        return True
+
+    def build_sheet(self, budget, path, deadline):
+        """Open OpenOffice Calc on a new spreadsheet and build the budget's sheet
+        (spreadsheet_ops.plan_sheet, the optional steps only while there is time before
+        `deadline`), saved to `path`. Calc stays open: the report copies the summary from it.
+        Returns the executor."""
+        from spreadsheet_exec import CalcExecutor
+        from spreadsheet_ops import plan_sheet
+        human = self.human
+        self.calc_win = open_calc(human)
+        ex = CalcExecutor(human, self.calc_win, path, log=log)
+        ex.select("A1")
+        ex.run(plan_sheet(budget, human.rng), deadline=deadline)
+        self.sheet_range = budget.summary_range
+        log(f"Budget sheet built ({ex.summary()})")
+        return ex
+
+    def sheet_to_clipboard(self, ref, expected=None):
+        """While writing: switch to the budget sheet, select `ref` and copy it (Ctrl+C), then go
+        back to Writer. expected: the rows the report means to paste - differences from what the
+        sheet shows are logged (the sheet's figures are pasted all the same). Returns the copied
+        text once Writer is in front again ('' if nothing usable was copied)."""
+        from spreadsheet_exec import CalcExecutor
+        human = self.human
+        if self.calc_win is None or not self._alive(self.calc_win.NativeWindowHandle) \
+                or not self.back_to(self.calc_win.NativeWindowHandle):
+            return ""
+        log(f"Copying {ref} from the budget sheet")
+        human.think("scan")
+        try:
+            CalcExecutor(human, self.calc_win, log=log).select(ref)
+        except TaskError as exc:
+            log(f"Couldn't select the figures: {exc}")
+            return ""
+        human.think("glance")
+        text = copy_to_clipboard(human)
+        rows = [line.split("	") for line in text.splitlines()]
+        if expected is not None and rows != expected:
+            log(f"The sheet shows {rows} - the report expected {expected}")
+        if not (len(rows) > 1 and all(len(r) > 1 for r in rows)):
+            log("Nothing usable was copied")
+            text = ""
+        human.think("mental", 0.5)
+        if self.writer_win is None or not self.back_to(self.writer_win.NativeWindowHandle):
+            return ""
+        return text
+
+    def close_sheet(self):
+        """Close the budget sheet's Calc window (it was saved; a 'Save changes?' is answered with Save)."""
+        if self.calc_win is None or not self._alive(self.calc_win.NativeWindowHandle):
+            return False
+        closed = close_writer(self.human, self.calc_win, app="Calc")
+        if closed:
+            self.calc_win, self.sheet_range = None, None
+        return closed
 
 
 def session_activities(ws):

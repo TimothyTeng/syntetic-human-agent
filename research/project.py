@@ -107,9 +107,10 @@ class WritingProject:
         """A WriterExecutor for the Writer document of `ws` (none with dry_run). If the document
         loses keyboard focus, it is clicked back into like a person would (refocus)."""
         refocus = (lambda: click_into_document(self.human, ws.writer_win, ws.writer_doc)) if not dry_run else None
+        paste = ws.sheet_to_clipboard if getattr(ws, "sheet_range", None) and not dry_run else None
         return WriterExecutor(self.human, None if dry_run else ws.writer_win, None if dry_run else ws.writer_doc,
                               save_path=self.doc_path, refocus=refocus, log=task_log, dry_run=dry_run,
-                              revisions=self.revisions, saved=self.saved)
+                              revisions=self.revisions, saved=self.saved, paste_source=paste)
 
     def write_next(self, ws, seconds, one_section=True, dry_run=False):
         """Type the next part of the paper into the Writer document of `ws` (already in front

@@ -71,9 +71,12 @@ class Bullets:
 @dataclass
 class Table:
     """A table of plain cell text, e.g. the key facts or the sources consulted; with
-    header=True the first row is set in bold."""
+    header=True the first row is set in bold. source: a spreadsheet range ('F1:G6') holding the
+    same text - the table is then copied from the spreadsheet and pasted in (typed if that
+    can't be done)."""
     rows: list                        # [[cell text]]; the first row is the header
     header: bool = True
+    source: str = None
 
 
 @dataclass

@@ -28,7 +28,8 @@ During a visit, after each page (choose_move):
   search   search the site (its search box when one is in view, else its search address in
            the address bar) and open one of the results - at most twice a visit
 The visit ends when its time is up (or nothing more is found to do there); then the next
-website. Link chains stay short (at most four hops from the page they started on). A cookie /
+website - in normal mode the page's address is sometimes copied into a scratch note in
+Notepad first (tasks.Workspace.jot_link). Link chains stay short (at most four hops from the page they started on). A cookie /
 privacy banner (AP News asks before showing anything) is accepted when it appears.
 
 Safety: only the allowed sites are opened; search results are picked by their address on the
@@ -282,6 +283,8 @@ class Surfer:
             try:
                 self.visit(kind, what, site)
                 failures = 0
+                if self.left() > self.MIN_ENTRY + 40:     # another website follows (typed in the address bar)
+                    self.note_link()
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:          # TaskError, or an unexpected UI / COM error
@@ -311,6 +314,17 @@ class Surfer:
             if tasks.close_browser(human, self.ws.chrome):
                 self.ws.chrome = None
         return self.stats
+
+    def note_link(self):
+        """Normal mode: sometimes note the page's address in the scratch note (Workspace.jot_link).
+        Notepad trouble doesn't end the browsing - Chrome is brought back and the next website
+        typed in."""
+        try:
+            self.ws.jot_link()
+        except TaskError as exc:
+            log(f"Couldn't note the link ({exc})")
+            if self.ws.chrome:
+                self.ws.back_to(self.ws.chrome)
 
     def visit_budget(self):
         """Seconds for the next website (see the module docstring)."""

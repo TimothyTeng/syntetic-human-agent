@@ -21,11 +21,16 @@ Normal (--process normal): the 30-minute office worker. 15 minutes of browsing
 (--browse-minutes): about --target-sites websites, one after another, each for a while - the
 page typed into the address bar read top-down at the person's reading pace (re-reading now
 and then), then links around the site, a search of it (a news article, a course), other
-results, back - and Chrome is closed. Then 15 minutes of writing (--write-minutes): a generated
+results, back - now and then copying a page's address into a scratch note in Notepad - and
+Chrome is closed. Then 15 minutes of writing (--write-minutes): first last month's budget sheet
+in OpenOffice Calc (--sheet-minutes: expenses typed in, totals, a SUMPRODUCT summary copied
+down, formats, a column chart, saved as .ods) with its totals jotted in the note, then a generated
 office document (status report, meeting notes, proposal or memo) of exactly
 --target-sentences sentences with a title, headings and varied sentences, formatted with
-shortcuts or by highlighting text and using the toolbar, saved under its title in
-runs/normal/ and Writer closed.
+shortcuts or by highlighting text and using the toolbar. Its spending section quotes the
+sheet's totals and pastes the sheet's summary in as a table (copied in Calc, pasted as plain
+text, Table > Convert > Text to Table). Everything is saved in runs/normal/ and Writer,
+Calc and the note are closed.
 
 Research (--process research --topic "..."): the same two phases for a researcher. Searches
 the topic on the allowed sites' own search pages (AP News, Coursera, then AP News for the
@@ -209,12 +214,15 @@ def main(argv=None):
                          "OpenOffice Writer document, session = browse + write for --minutes, normal = browse "
                          "the pre-selected sites then write a generated document, research = read about --topic "
                          "then write a paper in Writer, compose = write the paper from saved notes (no UI)")
-    ap.add_argument("--browse-minutes", type=float, default=15, help="normal / research: length of the browsing phase")
-    ap.add_argument("--write-minutes", type=float, default=15, help="normal / research: length of the writing phase")
+    ap.add_argument("--browse-minutes", type=float, default=17, help="normal / research: length of the browsing phase")
+    ap.add_argument("--write-minutes", type=float, default=17, help="normal / research: length of the writing phase")
     ap.add_argument("--target-sites", type=int, default=5,
                     help="normal: websites to visit while browsing (each for a while: reading, following "
                          "links around it, searching it)")
     ap.add_argument("--target-sentences", type=int, default=35, help="normal: sentences the document has")
+    ap.add_argument("--sheet-minutes", type=float, default=4,
+                    help="normal: time for the budget sheet in OpenOffice Calc, taken from the writing phase (at most 40%% "
+                         "of it; under a minute: no sheet, and the report has no spending section)")
     ap.add_argument("--sites-file", default=None,
                     help="normal: pre-selected sites, one address per line (default: surfing.SITES)")
     ap.add_argument("--topic", default=None, help="research: what to research and write about")

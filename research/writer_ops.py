@@ -28,6 +28,9 @@ it relies on was checked in Writer 4.1:
     one, which would add a row) and left with Ctrl+End - the document ends with the
     paragraph after the table, since everything is written at the end
   * after a table or a page break the caret already sits in a fresh paragraph
+  * a table with a source (a spreadsheet range) is preceded by paste_table: the executor copies
+    the range and pastes it in, and then drops the typed table's operations that follow;
+    if the paste can't be done they are typed as usual
 
 Formatting is done one of two ways, the way people mix them: switched on before the text is
 typed (Ctrl+B, then the words), or afterwards - the text is typed plain, then highlighted
@@ -39,7 +42,7 @@ renderer's state follows like after a toggle.
 
 Operations (Op.kind, args):
   style name | bullets on | bold on | italic on | size pt | reset_chars | align 'left'/'center'
-  type text mode | enter | page_break | table rows cols | next_cell | exit_table
+  type text mode | enter | page_break | table rows cols | next_cell | exit_table | paste_table range rows
   select n_words 'words'/'line' | deselect
   checkpoint block_index | save ['final']
 """
@@ -262,6 +265,8 @@ class Renderer:
         if isinstance(b, Table):
             self.new_paragraph()
             self.set_paragraph(BODY)             # the table goes into a plain empty paragraph
+            if b.source:                         # pasted from Calc; the typed table below is the fallback
+                self.emit("paste_table", b.source, tuple(tuple(row) for row in b.rows))
             outside = (self.bold, self.italic, self.direct)
             self.emit("table", len(b.rows), len(b.rows[0]))
             for r, row in enumerate(b.rows):

@@ -50,7 +50,13 @@ python -m tools.preflight --launch   # also opens Writer and Chrome briefly to c
 All modes run through `main.py`. **To abort at any time, slam the mouse into a screen corner.**
 
 ### Normal mode: the 30-minute office worker
-15 minutes browsing the allowed websites, then 15 minutes writing a generated office document (status report, meeting notes, proposal or memo) in Writer. The document is saved under `runs/normal/`.
+15 minutes browsing the allowed websites, then 15 minutes of office work:
+
+- **Notepad as scratch space.** While browsing, the agent sometimes copies a page's address from Chrome and pastes it into a note with a word on why. Later it jots the budget totals there too.
+- **OpenOffice Calc budget sheet** (`--sheet-minutes`, default 4, taken from the writing time). Last month's expenses are typed in and totalled with `SUM`. A `SUMPRODUCT` summary per category is typed once and copied down to the other categories. Headers and totals are bolded, amounts get two decimals, and a column chart of the summary is added with Insert > Chart. Often the columns are set to their optimal width, the top row frozen and the sheet renamed. Saved as `.ods`. OpenOffice shows UI Automation nothing, so the agent reads Calc's grid, column headers and menu bar from a screenshot (`controller/calc_screen.py`, numpy only). Mouse-minded personas then click cells, drag across ranges, open menus by their titles and fit columns by double-clicking a header border. Each click is checked on a fresh screenshot, with the keyboard as the fallback. While typing, the mouse drifts to the row being worked on instead of sitting still.
+- **Writer report** (status report, meeting notes, proposal or memo). Its spending section quotes the sheet's totals. The summary table is copied from Calc, pasted as unformatted text and turned into a Writer table with Table > Convert > Text to Table. If that can't be done, the table is typed. Writer is read from screenshots too (`controller/writer_screen.py`: the page, its lines of text, the menu bar). Mouse-minded personas open menus by their titles (Insert > Table, Table > Convert) and highlight the line just typed by dragging or triple-clicking, each checked on a fresh screenshot. The mouse also drifts to the text while typing and over dialogs while reading them.
+
+The report, the spreadsheet and `notes.txt` are saved under `runs/normal/`.
 
 ```bash
 python main.py --process normal
